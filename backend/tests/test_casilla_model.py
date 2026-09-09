@@ -5,7 +5,8 @@ import pytest
 from mesa.time import Priority
 
 from casilla import CasillaModel
-from casilla.agents import Message, Station, VoterAgent
+from casilla.agents import ADULTO_MAYOR_THRESHOLD, CANDIDATOS, Message, Station, VoterAgent
+from casilla.model import TRANSIT_TIMES
 
 
 def _arrivals(model: CasillaModel) -> list[tuple[int, float]]:
@@ -106,7 +107,7 @@ def test_arrival_logs_via_logging(caplog):
 
 
 def test_event_log_records_each_station_completion_in_order():
-    model = CasillaModel(num_voters=0, rng=1)
+    model = CasillaModel(num_voters=0, rng=1, rejection_rate=0.0)
     model.schedule_callback(model._on_voter_arrival, at=0.1)
 
     model.run_to_completion()
@@ -114,12 +115,55 @@ def test_event_log_records_each_station_completion_in_order():
     events = [e["event"] for e in model.event_log]
     assert events == [
         "ARRIVAL",
+        "MOVE",
         "SECRETARIO_DONE",
+        "MOVE",
         "MESA_DONE",
+        "MOVE",
         "CASILLA_DONE",
+        "MOVE",
         "URNA_DONE",
         "EXIT",
+        "MOVE",
     ]
+
+    moves = [e for e in model.event_log if e["event"] == "MOVE"]
+    assert [(m["from"], m["to"]) for m in moves] == [
+        ("entrada", "secretario"),
+        ("secretario", "mesa"),
+        ("mesa", "casilla"),
+        ("casilla", "urna"),
+        ("urna", "salida"),
+    ]
+
+
+# --- Voter demographics ----------------------------------------------------
+
+
+def test_voter_edad_is_within_range_and_voto_is_a_valid_candidate():
+    model = CasillaModel(num_voters=0, rng=1)
+    voter = VoterAgent(model, number=1)
+
+    assert 18 <= voter.edad <= 90
+    assert voter.voto in CANDIDATOS
+
+
+def test_es_adulto_mayor_matches_edad_threshold():
+    model = CasillaModel(num_voters=0, rng=1)
+    voter = VoterAgent(model, number=1)
+
+    assert voter.es_adulto_mayor == (voter.edad >= ADULTO_MAYOR_THRESHOLD)
+
+
+def test_arrival_event_includes_edad_and_voto():
+    model = CasillaModel(num_voters=0, rng=1)
+    model.schedule_callback(model._on_voter_arrival, at=0.1)
+
+    model.run_until(0.1)
+
+    arrival = next(e for e in model.event_log if e["event"] == "ARRIVAL")
+    assert 18 <= arrival["edad"] <= 90
+    assert arrival["voto"] in CANDIDATOS
 
 
 # --- INE rejection branch --------------------------------------------------
@@ -132,7 +176,7 @@ def test_rejected_voter_exits_after_secretario_and_never_reaches_mesa():
     model.run_to_completion()
 
     events = [e["event"] for e in model.event_log]
-    assert events == ["ARRIVAL", "SECRETARIO_DONE", "REJECTED"]
+    assert events == ["ARRIVAL", "MOVE", "SECRETARIO_DONE", "REJECTED"]
 
     voters = [a for a in model.agents if isinstance(a, VoterAgent)]
     assert len(voters) == 1
@@ -148,11 +192,16 @@ def test_accepted_voter_reaches_exit_when_rejection_rate_is_zero():
     events = [e["event"] for e in model.event_log]
     assert events == [
         "ARRIVAL",
+        "MOVE",
         "SECRETARIO_DONE",
+        "MOVE",
         "MESA_DONE",
+        "MOVE",
         "CASILLA_DONE",
+        "MOVE",
         "URNA_DONE",
         "EXIT",
+        "MOVE",
     ]
 
 
@@ -181,8 +230,13 @@ def test_station_queues_when_busy_and_serves_fifo_on_completion():
     completed: list[tuple[int, float]] = []
     station.on_complete = lambda voter: completed.append((voter.number, model.time))
 
+    # Pinned to the regular queue so this test's FIFO assertions don't
+    # depend on the randomly-generated es_adulto_mayor outcome — priority
+    # queueing is covered separately below.
     v1 = VoterAgent(model, number=1)
+    v1.es_adulto_mayor = False
     v2 = VoterAgent(model, number=2)
+    v2.es_adulto_mayor = False
     station.request(v1)
     station.request(v2)
 
@@ -206,6 +260,7 @@ def test_station_pause_blocks_new_starts_and_resume_releases_queue():
 
     station.receive_message(Message(sender="test", receiver=station, type="PAUSE", time=0.0))
     voter = VoterAgent(model, number=1)
+    voter.es_adulto_mayor = False
     station.request(voter)
 
     assert station.busy == 0
@@ -218,6 +273,126 @@ def test_station_pause_blocks_new_starts_and_resume_releases_queue():
 
     model.run_until(1.0)
     assert completed == [1]
+
+
+# --- Station: preferential queue for elderly voters -------------------------
+
+
+def test_elderly_voter_joins_priority_queue_instead_of_regular_queue():
+    model = CasillaModel(num_voters=0, rng=1)
+    station = Station(model, "secretario", capacity=1, service_time_range=(1.0, 1.0))
+
+    busy_voter = VoterAgent(model, number=1)
+    busy_voter.es_adulto_mayor = False
+    station.request(busy_voter)
+
+    elderly_voter = VoterAgent(model, number=2)
+    elderly_voter.es_adulto_mayor = True
+    station.request(elderly_voter)
+
+    assert list(station.queue) == []
+    assert list(station.priority_queue) == [elderly_voter]
+
+
+def test_elderly_voter_is_served_before_earlier_regular_voter_when_capacity_frees_up():
+    model = CasillaModel(num_voters=0, rng=1)
+    station = Station(model, "secretario", capacity=1, service_time_range=(1.0, 1.0))
+    completed: list[int] = []
+    station.on_complete = lambda voter: completed.append(voter.number)
+
+    busy_voter = VoterAgent(model, number=1)
+    busy_voter.es_adulto_mayor = False
+    station.request(busy_voter)
+
+    regular_voter = VoterAgent(model, number=2)
+    regular_voter.es_adulto_mayor = False
+    station.request(regular_voter)
+
+    # Arrives after regular_voter but should still be pulled first.
+    elderly_voter = VoterAgent(model, number=3)
+    elderly_voter.es_adulto_mayor = True
+    station.request(elderly_voter)
+
+    model.run_until(1.0)  # busy_voter's service completes, freeing one slot
+
+    assert completed == [1]
+    assert station.busy == 1  # the freed slot immediately started serving someone
+    assert list(station.priority_queue) == []  # elderly_voter was pulled...
+    assert list(station.queue) == [regular_voter]  # ...ahead of regular_voter
+
+    model.run_until(2.0)  # elderly_voter's service completes next
+
+    assert completed == [1, 3]
+
+
+# --- Station: queue-join/leave events ---------------------------------------
+
+
+def test_queue_join_records_queue_type_and_position():
+    model = CasillaModel(num_voters=0, rng=1)
+    station = Station(model, "secretario", capacity=1, service_time_range=(1.0, 1.0))
+
+    busy_voter = VoterAgent(model, number=1)
+    busy_voter.es_adulto_mayor = False
+    station.request(busy_voter)
+
+    regular_voter = VoterAgent(model, number=2)
+    regular_voter.es_adulto_mayor = False
+    station.request(regular_voter)
+
+    elderly_voter = VoterAgent(model, number=3)
+    elderly_voter.es_adulto_mayor = True
+    station.request(elderly_voter)
+
+    joins = [e for e in model.event_log if e["event"] == "QUEUE_JOIN"]
+    assert joins == [
+        {
+            "event": "QUEUE_JOIN",
+            "voter": 2,
+            "station": "secretario",
+            "queue_type": "regular",
+            "position": 0,
+            "time": 0.0,
+        },
+        {
+            "event": "QUEUE_JOIN",
+            "voter": 3,
+            "station": "secretario",
+            "queue_type": "priority",
+            "position": 0,
+            "time": 0.0,
+        },
+    ]
+
+
+def test_queue_leave_fires_when_pulled_and_prefers_priority_queue():
+    model = CasillaModel(num_voters=0, rng=1)
+    station = Station(model, "secretario", capacity=1, service_time_range=(1.0, 1.0))
+
+    busy_voter = VoterAgent(model, number=1)
+    busy_voter.es_adulto_mayor = False
+    station.request(busy_voter)
+
+    regular_voter = VoterAgent(model, number=2)
+    regular_voter.es_adulto_mayor = False
+    station.request(regular_voter)
+
+    elderly_voter = VoterAgent(model, number=3)
+    elderly_voter.es_adulto_mayor = True
+    station.request(elderly_voter)
+
+    model.run_until(1.0)
+
+    leaves = [e for e in model.event_log if e["event"] == "QUEUE_LEAVE"]
+    assert leaves == [
+        {
+            "event": "QUEUE_LEAVE",
+            "voter": 3,
+            "station": "secretario",
+            "queue_type": "priority",
+            "time": 1.0,
+        },
+    ]
 
 
 # --- Coordinador: broadcasts the external event to every station ----------
@@ -252,3 +427,38 @@ def test_external_event_appears_once_in_event_log():
     assert len(external_events) == 1
     assert external_events[0]["kind"] in {"corte_de_luz", "temblor", "aguacero"}
     assert 0 < external_events[0]["time"] < model.last_scheduled_arrival_time
+
+
+# --- Transit between stations -----------------------------------------------
+
+
+def test_start_transit_logs_move_event_immediately():
+    model = CasillaModel(num_voters=0, rng=1)
+    voter = VoterAgent(model, number=1)
+
+    model._start_transit(voter, "secretario", "mesa", lambda v: None)
+
+    moves = [e for e in model.event_log if e["event"] == "MOVE"]
+    assert len(moves) == 1
+    move = moves[0]
+    assert move["voter"] == 1
+    assert move["from"] == "secretario"
+    assert move["to"] == "mesa"
+    assert move["t_start"] == 0.0
+    lo, hi = TRANSIT_TIMES[("secretario", "mesa")]
+    assert lo <= move["t_end"] - move["t_start"] <= hi
+
+
+def test_start_transit_delays_the_callback_until_transit_completes():
+    model = CasillaModel(num_voters=0, rng=1)
+    voter = VoterAgent(model, number=1)
+    calls: list[float] = []
+
+    model._start_transit(voter, "secretario", "mesa", lambda v: calls.append(model.time))
+
+    assert calls == []  # scheduled, not fired synchronously
+
+    move = next(e for e in model.event_log if e["event"] == "MOVE")
+    model.run_until(move["t_end"])
+
+    assert calls == [move["t_end"]]

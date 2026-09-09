@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from mesa import Model
@@ -20,12 +21,24 @@ from .agents import Coordinador, Message, Station, VoterAgent
 
 logger = logging.getLogger(__name__)
 
+
 # Values are in simulated minutes.
 STATION_SERVICE_TIMES: dict[str, tuple[float, float]] = {
     "secretario": (1.5, 2.5),
     "mesa": (0.5, 1.5),
     "casilla": (2.0, 4.0),
     "urna": (0.2, 0.6),
+}
+
+# Walking time for each leg of the journey (also simulated minutes). Unity
+# owns real floor-plan coordinates, so the backend only needs a rough time
+# per leg, not distances.
+TRANSIT_TIMES: dict[tuple[str, str], tuple[float, float]] = {
+    ("entrada", "secretario"): (0.3, 0.6),
+    ("secretario", "mesa"): (0.1, 0.3),
+    ("mesa", "casilla"): (0.2, 0.4),
+    ("casilla", "urna"): (0.1, 0.2),
+    ("urna", "salida"): (0.2, 0.5),
 }
 
 EXTERNAL_EVENT_KINDS = ["corte_de_luz", "temblor", "aguacero"]
@@ -88,8 +101,12 @@ class CasillaModel(Model):
         )
 
         self.secretario.on_complete = self._on_secretario_done  # branches on INE rejection
-        self.mesa.on_complete = lambda voter: self.casilla.request(voter)
-        self.casilla.on_complete = lambda voter: self.urna.request(voter)
+        self.mesa.on_complete = lambda voter: self._start_transit(
+            voter, "mesa", "casilla", self.casilla.request
+        )
+        self.casilla.on_complete = lambda voter: self._start_transit(
+            voter, "casilla", "urna", self.urna.request
+        )
         self.urna.on_complete = self._on_exit
 
         self._schedule_arrivals(num_voters, arrival_rate)
@@ -127,10 +144,16 @@ class CasillaModel(Model):
         self._voter_counter += 1
         voter = VoterAgent(self, number=self._voter_counter)
         self.event_log.append(
-            {"event": "ARRIVAL", "voter": voter.number, "time": self.time}
+            {
+                "event": "ARRIVAL",
+                "voter": voter.number,
+                "time": self.time,
+                "edad": voter.edad,
+                "voto": voter.voto,
+            }
         )
         logger.info("Votante %s llega en t=%.2f", voter.number, self.time)
-        self.secretario.request(voter)
+        self._start_transit(voter, "entrada", "secretario", self.secretario.request)
 
     def _on_secretario_done(self, voter: VoterAgent) -> None:
         if self.random.random() < self.rejection_rate:
@@ -149,13 +172,50 @@ class CasillaModel(Model):
                 "Votante %s RECHAZADO (INE invalida) en t=%.2f", voter.number, self.time
             )
             return
-        self.mesa.request(voter)
+        self._start_transit(voter, "secretario", "mesa", self.mesa.request)
 
     def _on_exit(self, voter: VoterAgent) -> None:
         self.event_log.append(
             {"event": "EXIT", "voter": voter.number, "time": self.time}
         )
         logger.info("Votante %s EXITS en t=%.2f", voter.number, self.time)
+        self._start_transit(voter, "urna", "salida", lambda v: None)
+
+    def _start_transit(
+        self,
+        voter: VoterAgent,
+        from_name: str,
+        to_name: str,
+        then: Callable[[VoterAgent], None],
+    ) -> None:
+        """Log a walking segment and call ``then(voter)`` once it ends.
+
+        Stations hand voters off instantly in simulated time; this is the
+        only place that inserts real walking time between them, so Unity
+        has a (from, to, t_start, t_end) segment to Lerp instead of a
+        teleport.
+        """
+        t0 = self.time
+        transit = self.random.uniform(*TRANSIT_TIMES[(from_name, to_name)])
+        self.event_log.append(
+            {
+                "event": "MOVE",
+                "voter": voter.number,
+                "from": from_name,
+                "to": to_name,
+                "t_start": t0,
+                "t_end": t0 + transit,
+            }
+        )
+        logger.info(
+            "Votante %s camina de %s a %s (t=%.2f a t=%.2f)",
+            voter.number,
+            from_name,
+            to_name,
+            t0,
+            t0 + transit,
+        )
+        self.schedule_callback(functools.partial(then, voter), after=transit)
 
     def _schedule_external_event(self) -> None:
         if self.last_scheduled_arrival_time is None:

@@ -5,6 +5,7 @@ Communication between agents is explicit: every handoff (a station giving
 a voter a turn, telling it to wait, or the coordinator pausing/resuming a
 station) goes through a ``Message`` object logged at send time, not a bare
 method call.
+
 """
 
 from __future__ import annotations
@@ -19,6 +20,10 @@ from typing import Any
 from mesa import Agent
 
 logger = logging.getLogger(__name__)
+
+ADULTO_MAYOR_THRESHOLD = 60
+CANDIDATOS = ["A", "B", "C"]
+CANDIDATO_WEIGHTS = None  # None = equal probability for every candidate
 
 
 @dataclass
@@ -49,6 +54,9 @@ class VoterAgent(Agent):
         # 1-based display number; Mesa's own unique_id is shared across all
         # agents, so the first voter would otherwise log as "Votante 6".
         self.number = number
+        self.edad = model.random.randint(18, 90)
+        self.es_adulto_mayor = self.edad >= ADULTO_MAYOR_THRESHOLD
+        self.voto = model.random.choices(CANDIDATOS, weights=CANDIDATO_WEIGHTS)[0]
         self.status: str = "arrived"
         self.timestamps: dict[str, float] = {}
 
@@ -71,12 +79,14 @@ class VoterAgent(Agent):
 
 
 class Station(Agent):
-    """A capacity-limited resource with a FIFO wait queue.
+    """A capacity-limited resource with FIFO wait queues.
 
     Mesa's own scheduler has no built-in limited-capacity resource, so this
     fills that gap: voters either start service immediately (if there's
-    free capacity and the station isn't paused) or wait in a FIFO queue
-    until it is their turn.
+    free capacity and the station isn't paused) or wait in one of two FIFO
+    queues until it is their turn — a priority queue for adultos mayores
+    (``edad >= ADULTO_MAYOR_THRESHOLD``), always drained before the regular
+    queue.
     """
 
     def __init__(
@@ -92,12 +102,26 @@ class Station(Agent):
         self.service_time_range = service_time_range
         self.busy = 0
         self.queue: deque[VoterAgent] = deque()
+        self.priority_queue: deque[VoterAgent] = deque()
         self.paused = False
         self.on_complete: Callable[[VoterAgent], None] | None = None
 
     def request(self, voter: VoterAgent) -> None:
         if self.paused or self.busy >= self.capacity:
-            self.queue.append(voter)
+            queue_type = "priority" if voter.es_adulto_mayor else "regular"
+            target = self.priority_queue if voter.es_adulto_mayor else self.queue
+            position = len(target)
+            target.append(voter)
+            self.model.event_log.append(
+                {
+                    "event": "QUEUE_JOIN",
+                    "voter": voter.number,
+                    "station": self.name,
+                    "queue_type": queue_type,
+                    "position": position,
+                    "time": self.model.time,
+                }
+            )
             self._send(voter, "WAIT")
             return
         self._start_service(voter)
@@ -132,8 +156,24 @@ class Station(Agent):
         self._pull_from_queue()
 
     def _pull_from_queue(self) -> None:
-        while self.queue and not self.paused and self.busy < self.capacity:
-            next_voter = self.queue.popleft()
+        while not self.paused and self.busy < self.capacity:
+            if self.priority_queue:
+                next_voter = self.priority_queue.popleft()
+                queue_type = "priority"
+            elif self.queue:
+                next_voter = self.queue.popleft()
+                queue_type = "regular"
+            else:
+                break
+            self.model.event_log.append(
+                {
+                    "event": "QUEUE_LEAVE",
+                    "voter": next_voter.number,
+                    "station": self.name,
+                    "queue_type": queue_type,
+                    "time": self.model.time,
+                }
+            )
             self._start_service(next_voter)
 
     def receive_message(self, message: Message) -> None:
