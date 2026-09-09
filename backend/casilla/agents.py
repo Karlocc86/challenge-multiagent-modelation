@@ -128,6 +128,14 @@ class Station(Agent):
 
     def _start_service(self, voter: VoterAgent) -> None:
         self.busy += 1
+        self.model.event_log.append(
+            {
+                "event": f"{self.name.upper()}_START",
+                "voter": voter.number,
+                "station": self.name,
+                "time": self.model.time,
+            }
+        )
         self._send(voter, "TURN")
         service_time = self.model.random.uniform(*self.service_time_range)
         self.model.schedule_callback(

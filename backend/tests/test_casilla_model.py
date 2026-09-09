@@ -116,12 +116,16 @@ def test_event_log_records_each_station_completion_in_order():
     assert events == [
         "ARRIVAL",
         "MOVE",
+        "SECRETARIO_START",
         "SECRETARIO_DONE",
         "MOVE",
+        "MESA_START",
         "MESA_DONE",
         "MOVE",
+        "CASILLA_START",
         "CASILLA_DONE",
         "MOVE",
+        "URNA_START",
         "URNA_DONE",
         "EXIT",
         "MOVE",
@@ -176,7 +180,7 @@ def test_rejected_voter_exits_after_secretario_and_never_reaches_mesa():
     model.run_to_completion()
 
     events = [e["event"] for e in model.event_log]
-    assert events == ["ARRIVAL", "MOVE", "SECRETARIO_DONE", "REJECTED"]
+    assert events == ["ARRIVAL", "MOVE", "SECRETARIO_START", "SECRETARIO_DONE", "REJECTED"]
 
     voters = [a for a in model.agents if isinstance(a, VoterAgent)]
     assert len(voters) == 1
@@ -193,12 +197,16 @@ def test_accepted_voter_reaches_exit_when_rejection_rate_is_zero():
     assert events == [
         "ARRIVAL",
         "MOVE",
+        "SECRETARIO_START",
         "SECRETARIO_DONE",
         "MOVE",
+        "MESA_START",
         "MESA_DONE",
         "MOVE",
+        "CASILLA_START",
         "CASILLA_DONE",
         "MOVE",
+        "URNA_START",
         "URNA_DONE",
         "EXIT",
         "MOVE",
@@ -250,6 +258,20 @@ def test_station_queues_when_busy_and_serves_fifo_on_completion():
     model.run_until(2.0)
     assert completed == [(1, 1.0), (2, 2.0)]
     assert station.busy == 0
+
+
+def test_start_service_logs_a_station_start_event():
+    model = CasillaModel(num_voters=0, rng=1)
+    station = Station(model, "secretario", capacity=1, service_time_range=(1.0, 1.0))
+    voter = VoterAgent(model, number=1)
+    voter.es_adulto_mayor = False
+
+    station.request(voter)
+
+    starts = [e for e in model.event_log if e["event"] == "SECRETARIO_START"]
+    assert starts == [
+        {"event": "SECRETARIO_START", "voter": 1, "station": "secretario", "time": 0.0},
+    ]
 
 
 def test_station_pause_blocks_new_starts_and_resume_releases_queue():
