@@ -55,6 +55,7 @@ public class SimulationRunner : MonoBehaviour
     {
         public Summary summary;
         public List<Movement> movements;
+        public List<QueueEvent> queue_events;
         public List<StationEvent> station_events;
         public List<VoterEvent> voter_events;
     }
@@ -79,6 +80,18 @@ public class SimulationRunner : MonoBehaviour
         public List<string> tied_candidates;
     }
     [System.Serializable] class Movement { public int voter; public string from; public string to; public float t_start; public float t_end; }
+    // Un votante formado. `position` es su lugar en la fila de esa estacion, y
+    // `queue_type` distingue la fila de adultos mayores de la general.
+    [System.Serializable]
+    class QueueEvent
+    {
+        public int voter;
+        public string station;
+        public string queue_type;
+        public int position;
+        public float t_join;
+        public float t_leave;
+    }
     [System.Serializable] class StationEvent { public int voter; public string station; public string @event; public float t; }
     [System.Serializable] class VoterEvent { public int voter; public string @event; public float t; }
 
@@ -94,7 +107,8 @@ public class SimulationRunner : MonoBehaviour
     readonly Dictionary<string, int[]> capacities = new();
     readonly Dictionary<string, int> nextSlot = new();      // reparto round-robin de slots
     readonly Dictionary<int, int> voterSlot = new();        // id -> slot asignado
-    int movIdx, staIdx, votIdx;
+    readonly Dictionary<int, QueueEvent> currentQueue = new(); // id -> fila en la que espera
+    int movIdx, staIdx, votIdx, colaIdx;
 
     void Start()
     {
@@ -198,6 +212,7 @@ public class SimulationRunner : MonoBehaviour
         }
 
         ProcessVoterEvents();
+        ProcessQueueEvents();
         ProcessStationEvents();
         ProcessMovements();
         InterpolateActiveMoves();
@@ -350,9 +365,101 @@ public class SimulationRunner : MonoBehaviour
                 voters.Remove(e.voter);
                 currentMove.Remove(e.voter);
                 currentStation.Remove(e.voter);
+                SoltarLugarEnFila(e.voter);
                 ReleaseSlot(e.voter);
             }
         }
+    }
+
+    // Coloca a cada votante formado en su lugar de la fila. Sin esto todos los
+    // que esperan se quedan encimados en el escritorio de la estacion, porque su
+    // ultimo movimiento los dejo ahi y nada los vuelve a mover hasta que les toca.
+    void ProcessQueueEvents()
+    {
+        var ev = timeline.queue_events;
+        if (ev == null) return;                     // backend viejo sin queue_events
+
+        while (colaIdx < ev.Count && ev[colaIdx].t_join <= simClock)
+        {
+            var e = ev[colaIdx++];
+            currentQueue[e.voter] = e;
+            TomarLugarEnFila(e);
+        }
+
+        var yaPasaron = new List<int>();
+        foreach (var (id, e) in currentQueue)
+        {
+            if (simClock >= e.t_leave) { yaPasaron.Add(id); continue; }
+            if (!voters.TryGetValue(id, out var go) || go == null) { yaPasaron.Add(id); continue; }
+            // Mientras camina hacia la fila lo mueve la interpolacion; solo lo
+            // paramos en su lugar cuando ya llego.
+            if (currentMove.ContainsKey(id)) continue;
+
+            if (!anclaDeEspera.TryGetValue(id, out var anchor) || !anchor)
+                continue;                           // sin lugar libre, se queda donde este
+            // Solo la posicion del ancla: su rotacion puede venir tumbada del FBX,
+            // igual que en los SLOT_. Los paramos verticales mirando al mueble.
+            go.transform.position = anchor.position;
+            go.transform.rotation = Quaternion.Euler(0f, 90f + yawOffset, 0f);
+        }
+        foreach (var id in yaPasaron) SoltarLugarEnFila(id);
+    }
+
+    // -------------------------------------------------------------------
+    // Reparto de lugares en la fila.
+    //
+    // El FBX trae las filas repartidas por escritorio, QUEUE_<ESTACION>_<slot>_<pos>,
+    // con QUEUE_LUGARES_POR_SLOT lugares en cada una.
+    //
+    // No usamos el `position` que manda el backend: ese numero es la posicion al
+    // momento de formarse y no se actualiza cuando la fila avanza, asi que dos
+    // personas distintas acaban registradas en el mismo lugar y se encimarian.
+    // En vez de eso repartimos el primer lugar libre y lo soltamos al salir, igual
+    // que hacemos con los escritorios. Como la fila es FIFO, el orden visual sale
+    // casi igual al real. Los adultos mayores se reparten desde el otro extremo
+    // para que su fila se distinga de la general.
+    // -------------------------------------------------------------------
+    const int QUEUE_LUGARES_POR_SLOT = 4;
+
+    readonly Dictionary<string, int[]> lugaresDeFila = new();     // estacion -> ocupante por lugar
+    // El ancla se resuelve una vez al asignar el lugar, no cada frame: en una
+    // casilla saturada hay cientos de personas formadas a la vez.
+    readonly Dictionary<int, Transform> anclaDeEspera = new();    // id -> ancla asignada
+
+    int[] PoolDeFila(string estacion)
+    {
+        if (lugaresDeFila.TryGetValue(estacion, out var pool)) return pool;
+        int slots = capacities.TryGetValue(estacion, out var servicio) ? servicio.Length : 1;
+        pool = new int[Mathf.Max(1, slots) * QUEUE_LUGARES_POR_SLOT];
+        lugaresDeFila[estacion] = pool;
+        return pool;
+    }
+
+    void TomarLugarEnFila(QueueEvent e)
+    {
+        var pool = PoolDeFila(e.station.ToLowerInvariant());
+        bool prioridad = e.queue_type == "priority";
+        for (int i = 0; i < pool.Length; i++)
+        {
+            int idx = prioridad ? pool.Length - 1 - i : i;
+            if (pool[idx] != 0) continue;
+            var anchor = Anchor($"QUEUE_{e.station.ToUpperInvariant()}_" +
+                                $"{idx / QUEUE_LUGARES_POR_SLOT:D2}_{idx % QUEUE_LUGARES_POR_SLOT:D2}");
+            if (!anchor) continue;                  // lugar sin ancla modelada, probamos el siguiente
+            pool[idx] = e.voter;
+            anclaDeEspera[e.voter] = anchor;
+            return;
+        }
+        // Fila mas larga que los lugares modelados: se queda sin lugar y no se
+        // reposiciona, en vez de encimarse sobre alguien.
+    }
+
+    void SoltarLugarEnFila(int voterId)
+    {
+        currentQueue.Remove(voterId);
+        if (!anclaDeEspera.Remove(voterId)) return;
+        foreach (var pool in lugaresDeFila.Values)
+            for (int i = 0; i < pool.Length; i++) if (pool[i] == voterId) pool[i] = 0;
     }
 
     void ProcessStationEvents()
@@ -365,6 +472,7 @@ public class SimulationRunner : MonoBehaviour
 
             if (e.@event == "SERVICE_START")
             {
+                SoltarLugarEnFila(e.voter);
                 int slot = AssignSlot(e.voter, e.station);
                 var anchor = Anchor($"SLOT_{e.station.ToUpperInvariant()}_{slot:D2}");
                 // Solo la posicion del ancla; la rotacion del empty puede venir
