@@ -724,7 +724,10 @@ public class SimulationRunner : MonoBehaviour
         GUILayout.Label($"<b>Votante {seleccionado}</b>   Edad: {edad}", _ficha);
         GUILayout.Label($"Adulto mayor: {mayor}", _ficha);
         GUILayout.Label($"Voto: {voto}", _ficha);
-        GUILayout.Label($"Estado: {EstadoDelSeleccionado(out float desde)}", _ficha);
+        // La variable se declara aparte y no dentro del string interpolado: el
+        // alcance de un 'out' ahi es terreno resbaladizo entre versiones del compilador.
+        string estado = EstadoDelSeleccionado(out float desde);
+        GUILayout.Label($"Estado: {estado}", _ficha);
         GUILayout.Label(desde >= 0f ? $"Lleva: {simClock - desde:0.0} min" : " ", _ficha);
         int i = IndiceDelProximoEvento();
         GUILayout.Label(i >= 0 ? $"Sigue: {etiquetasDelSeleccionado[i]}" : "Sin mas eventos", _ficha);
