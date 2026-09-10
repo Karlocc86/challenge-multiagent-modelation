@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.Networking;
 using Newtonsoft.Json;
 
@@ -59,6 +60,11 @@ public class SimulationRunner : MonoBehaviour
     public Light lucesCasilla;
     [Tooltip("Que tanto se sacude la camara durante un temblor.")]
     public float shakeMagnitud = 0.15f;
+
+    [Header("Controles de reproduccion")]
+    [Tooltip("Multiplicadores que ofrecen los botones de velocidad. Se aplican " +
+             "sobre el Speed de arriba, asi que x1 siempre es el valor que pusiste.")]
+    public float[] multiplicadores = { 0.5f, 1f, 5f, 20f };
 
     [Header("Panel en pantalla")]
     [Tooltip("Hora simulada a la que arranca la jornada (24h). 8 = 8:00 AM.")]
@@ -117,7 +123,8 @@ public class SimulationRunner : MonoBehaviour
         public float t_leave;
     }
     [System.Serializable] class StationEvent { public int voter; public string station; public string @event; public float t; }
-    [System.Serializable] class VoterEvent { public int voter; public string @event; public float t; }
+    [System.Serializable] class VoterEvent { public int voter; public string @event; public float t;
+                                         public int edad; public string voto; public bool es_adulto_mayor; }
     [System.Serializable] class ExternalEvent { public string kind; public float t_start; public float duration; }
 
     // -------------------------------------------------------------------
@@ -141,6 +148,28 @@ public class SimulationRunner : MonoBehaviour
     ExternalEvent eventoActivo;
     float finEventoActivo;
 
+    // -------------------------------------------------------------------
+    // Controles de reproduccion. Todo mueve el mismo simClock que alimenta el
+    // reloj del panel: pausar lo congela, la velocidad lo escala, y los saltos
+    // lo escriben hacia adelante. Nunca hacia atras: los votantes destruidos en
+    // EXIT no reaparecen y los pools de slots y filas son acumulados.
+    // -------------------------------------------------------------------
+    enum Accion { Ninguna, TogglePausa, SiguienteVotante, SiguienteEvento, CambiarVelocidad }
+    Accion accionPendiente = Accion.Ninguna;
+    int multiplicadorPedido = -1;
+    bool pausado;
+    float speedBase;
+    int multiplicadorActivo;
+    FreeCamera camara;
+
+    int seleccionado = -1;
+    int pendienteSeleccionar = -1;          // esperando a que su ARRIVAL lo instancie
+    string desenlaceSeleccionado;           // "EXIT" | "REJECTED" | null si sigue dentro
+    readonly List<float> tiemposDelSeleccionado = new();
+    readonly List<string> etiquetasDelSeleccionado = new();
+    readonly Dictionary<int, float> inicioEstacion = new();   // id -> t del SERVICE_START
+    readonly Dictionary<int, VoterEvent> fichaPorVotante = new();
+
     void Start()
     {
         capacities["secretario"] = new int[secretarioCapacity];
@@ -148,6 +177,13 @@ public class SimulationRunner : MonoBehaviour
         capacities["casilla"]    = new int[casillaCapacity];
         capacities["urna"]       = new int[urnaCapacity];
         foreach (var etapa in capacities.Keys) nextSlot[etapa] = 0;
+
+        speedBase = speed;
+        multiplicadorActivo = System.Array.IndexOf(multiplicadores, 1f);
+        if (multiplicadorActivo < 0) multiplicadorActivo = 0;
+        camara = Camera.main != null ? Camera.main.GetComponent<FreeCamera>() : null;
+        if (camara == null)
+            Debug.LogWarning("La Main Camera no tiene FreeCamera: no habra seguimiento ni sacudida.");
 
         IndexAnchors();
         StartCoroutine(FetchAndRun());
@@ -274,6 +310,9 @@ public class SimulationRunner : MonoBehaviour
         }
 
         timeline = JsonConvert.DeserializeObject<Timeline>(req.downloadHandler.text);
+        foreach (var e in timeline.voter_events)
+            if (e.@event == "ARRIVAL") fichaPorVotante[e.voter] = e;
+
         Debug.Log($"Timeline recibido: {timeline.movements.Count} movimientos, " +
                   $"{timeline.station_events.Count} eventos de estacion, " +
                   $"{timeline.voter_events.Count} eventos de votante.");
@@ -307,6 +346,12 @@ public class SimulationRunner : MonoBehaviour
     {
         if (timeline == null) return;
 
+        // Los botones no mutan nada: encolan. OnGUI corre varias veces por frame
+        // y cambiar el numero de controles entre la pasada de Layout y la de
+        // Repaint lanza "Mismatched LayoutGroup".
+        AplicarAccionPendiente();
+        LeerTeclas();
+
         // El reloj se detiene cuando termina la jornada (sale el ultimo votante).
         float fin = timeline.summary != null ? timeline.summary.duration_minutes : float.MaxValue;
         if (simClock >= fin)
@@ -314,7 +359,7 @@ public class SimulationRunner : MonoBehaviour
             simClock = fin;
             jornadaTerminada = true;
         }
-        else
+        else if (!pausado)
         {
             simClock += Time.deltaTime * (speed / 60f);   // speed = minutos simulados por segundo real
         }
@@ -326,6 +371,178 @@ public class SimulationRunner : MonoBehaviour
         ProcessMovements();
         InterpolateActiveMoves();
         UpdateAnimators();
+        ResolverSeleccionPendiente();
+    }
+
+    // -------------------------------------------------------------------
+    // Controles
+    // -------------------------------------------------------------------
+    void LeerTeclas()
+    {
+        var kb = Keyboard.current;
+        if (kb == null) return;
+        if (kb.spaceKey.wasPressedThisFrame) accionPendiente = Accion.TogglePausa;
+        if (kb.nKey.wasPressedThisFrame) accionPendiente = Accion.SiguienteVotante;
+        if (kb.mKey.wasPressedThisFrame) accionPendiente = Accion.SiguienteEvento;
+    }
+
+    void AplicarAccionPendiente()
+    {
+        var a = accionPendiente;
+        accionPendiente = Accion.Ninguna;
+        switch (a)
+        {
+            case Accion.TogglePausa:      pausado = !pausado; break;
+            case Accion.SiguienteVotante: SeleccionarSiguienteVotante(); break;
+            case Accion.SiguienteEvento:  SaltarAlProximoEventoDelSeleccionado(); break;
+            case Accion.CambiarVelocidad:
+                multiplicadorActivo = multiplicadorPedido;
+                speed = speedBase * multiplicadores[multiplicadorActivo];
+                break;
+        }
+    }
+
+    // Unico sitio donde el reloj se mueve a mano. Un salto grande es seguro: los
+    // cinco while de consumo son inclusivos y drenan todo lo pendiente en el
+    // mismo frame, incluidas las entradas y salidas de fila y de escritorio.
+    void SaltarReloj(float destino)
+    {
+        float fin = timeline.summary != null ? timeline.summary.duration_minutes : float.MaxValue;
+        destino = Mathf.Min(destino, fin);
+        if (destino <= simClock) return;
+        simClock = destino;
+    }
+
+    // -------------------------------------------------------------------
+    // Seleccion y seguimiento
+    // -------------------------------------------------------------------
+    void SeleccionarSiguienteVotante()
+    {
+        var ids = voters.Where(kv => kv.Value != null).Select(kv => kv.Key).OrderBy(id => id).ToList();
+        if (ids.Count == 0) { SaltarAlProximoArrival(); return; }
+
+        // Los ids del backend empiezan en 1, asi que 0 sirve de centinela.
+        int siguiente = ids.FirstOrDefault(id => id > seleccionado);
+        if (siguiente == 0) siguiente = ids[0];
+        Seleccionar(siguiente);
+    }
+
+    void SaltarAlProximoArrival()
+    {
+        if (jornadaTerminada) return;
+        for (int i = votIdx; i < timeline.voter_events.Count; i++)
+        {
+            var e = timeline.voter_events[i];
+            if (e.@event != "ARRIVAL" || e.t <= simClock) continue;
+            SaltarReloj(e.t);
+            pendienteSeleccionar = e.voter;   // su GameObject todavia no existe
+            return;
+        }
+    }
+
+    void ResolverSeleccionPendiente()
+    {
+        if (pendienteSeleccionar < 0) return;
+        if (voters.TryGetValue(pendienteSeleccionar, out var go) && go != null)
+        {
+            Seleccionar(pendienteSeleccionar);
+            return;
+        }
+        // Si su llegada ya quedo atras y aun asi no esta, soltarlo en vez de
+        // quedarnos esperando para siempre.
+        bool aunPorLlegar = timeline.voter_events.Any(
+            e => e.voter == pendienteSeleccionar && e.@event == "ARRIVAL" && e.t > simClock);
+        if (!aunPorLlegar) pendienteSeleccionar = -1;
+    }
+
+    void Seleccionar(int id)
+    {
+        seleccionado = id;
+        pendienteSeleccionar = -1;
+        desenlaceSeleccionado = null;
+        ConstruirEventosDelSeleccionado(id);
+        if (camara != null && voters.TryGetValue(id, out var go) && go != null)
+            camara.Seguir(go.transform);
+    }
+
+    // Se arma una vez por seleccion: filtrar cuatro listas de miles de entradas
+    // en cada frame seria absurdo, y no cambian despues del fetch.
+    void ConstruirEventosDelSeleccionado(int id)
+    {
+        tiemposDelSeleccionado.Clear();
+        etiquetasDelSeleccionado.Clear();
+        // La prioridad decide que etiqueta gana cuando varios hitos caen en el
+        // mismo instante: "Lo atiende secretario" dice mas que "Llega a
+        // secretario", y los dos ocurren en el mismo minuto.
+        var lista = new List<(float t, int prioridad, string etiqueta)>();
+
+        foreach (var m in timeline.movements.Where(m => m.voter == id))
+        {
+            lista.Add((m.t_start, 0, $"Sale hacia {m.to}"));
+            lista.Add((m.t_end, 0, $"Llega a {m.to}"));
+        }
+        if (timeline.queue_events != null)
+            foreach (var q in timeline.queue_events.Where(q => q.voter == id))
+            {
+                lista.Add((q.t_join, 1, $"Se forma en {q.station}"));
+                lista.Add((q.t_leave, 1, $"Le toca turno en {q.station}"));
+            }
+        foreach (var st in timeline.station_events.Where(st => st.voter == id))
+            lista.Add((st.t, 2, st.@event == "SERVICE_START"
+                                ? $"Lo atiende {st.station}" : $"Termina en {st.station}"));
+        foreach (var v in timeline.voter_events.Where(v => v.voter == id))
+            lista.Add((v.t, 3, v.@event == "ARRIVAL" ? "Llega a la casilla"
+                             : v.@event == "REJECTED" ? "INE rechazada"
+                             : "Sale de la casilla"));
+
+        // Un solo paso por instante: saltar dos veces al mismo minuto no
+        // avanzaria el reloj y el boton pareceria roto. Se agrupa por milesima
+        // de minuto en vez de por EPS_EVENTO porque t*10000 pierde precision en
+        // float con una jornada larga.
+        foreach (var grupo in lista.GroupBy(x => Mathf.Round(x.t * 1000f))
+                                   .OrderBy(g => g.Min(x => x.t)))
+        {
+            var mejor = grupo.OrderByDescending(x => x.prioridad).First();
+            tiemposDelSeleccionado.Add(mejor.t);
+            etiquetasDelSeleccionado.Add(mejor.etiqueta);
+        }
+    }
+
+    // Margen para no volver a "saltar" al evento en el que ya estamos parados.
+    const float EPS_EVENTO = 1e-4f;
+
+    int IndiceDelProximoEvento()
+    {
+        for (int i = 0; i < tiemposDelSeleccionado.Count; i++)
+            if (tiemposDelSeleccionado[i] > simClock + EPS_EVENTO) return i;
+        return -1;
+    }
+
+    void SaltarAlProximoEventoDelSeleccionado()
+    {
+        int i = IndiceDelProximoEvento();
+        if (i < 0) return;                  // sin mas eventos; el boton ya esta gris
+        SaltarReloj(tiemposDelSeleccionado[i]);
+    }
+
+    string EstadoDelSeleccionado(out float desde)
+    {
+        desde = -1f;
+        if (desenlaceSeleccionado == "EXIT") return "Salio de la casilla";
+        if (desenlaceSeleccionado == "REJECTED") return "Rechazado: INE invalida";
+        // currentMove primero: mientras camina hacia su lugar sigue registrado en
+        // currentQueue, y decir "en fila" viendolo caminar seria mentir.
+        if (currentMove.TryGetValue(seleccionado, out var m))
+        { desde = m.t_start; return $"Caminando a {m.to}"; }
+        if (currentStation.TryGetValue(seleccionado, out var est))
+        { inicioEstacion.TryGetValue(seleccionado, out desde); return $"Lo atiende {est}"; }
+        if (currentQueue.TryGetValue(seleccionado, out var q))
+        {
+            desde = q.t_join;
+            return $"En fila de {q.station}" + (q.queue_type == "priority" ? " (prioritaria)" : "");
+        }
+        if (!voters.ContainsKey(seleccionado)) return "Aun no llega";
+        return "Esperando";
     }
 
     // Convierte los minutos simulados en una hora de reloj "HH:MM AM/PM".
@@ -339,7 +556,7 @@ public class SimulationRunner : MonoBehaviour
         return $"{h12:00}:{m:00} {ampm}";
     }
 
-    GUIStyle _estilo, _estiloFin, _estiloGanador, _caja;
+    GUIStyle _estilo, _estiloFin, _estiloGanador, _caja, _boton, _botonActivo, _ficha;
     Font _fuente;
 
     // Arial solo existe en Windows/Mac; en Linux el equivalente metrico es
@@ -387,12 +604,24 @@ public class SimulationRunner : MonoBehaviour
                 fontSize = 21,
                 normal = { textColor = new Color(0.45f, 1f, 0.55f) }
             };
+            // GUI.skin.button conserva su fondo; lo unico que le falta es la
+            // fuente, por el mismo motivo que el resto del panel.
+            _boton = new GUIStyle(GUI.skin.button) { font = _fuente, fontSize = 16 };
+            _botonActivo = new GUIStyle(_boton)
+            {
+                normal = { textColor = new Color(0.45f, 1f, 0.55f) },
+                hover  = { textColor = new Color(0.45f, 1f, 0.55f) }
+            };
+            _ficha = new GUIStyle(_estilo) { fontSize = 17 };
         }
 
         var res = timeline.summary != null ? timeline.summary.results : null;
 
-        // El panel crece segun cuantos candidatos haya, para no cortar texto.
-        int alto = 180;
+        // El alto se calcula antes de dibujar y solo con estado que no cambia
+        // dentro del OnGUI, porque los botones encolan en vez de mutar.
+        int alto = 180 + 86;                       // dos filas de controles
+        if (seleccionado >= 0) alto += 24 * 6;     // las seis lineas de la ficha
+        else alto += 24;
         if (jornadaTerminada)
         {
             alto += 40;
@@ -400,15 +629,19 @@ public class SimulationRunner : MonoBehaviour
                 alto += 34 + res.votes_by_candidate.Count * 24 + 34;
         }
 
-        GUI.Box(new Rect(20, 20, 300, alto), GUIContent.none, _caja);
-        GUILayout.BeginArea(new Rect(34, 30, 280, alto - 10));
+        // 340 y no 300: cuatro botones de velocidad no caben en 280 de area.
+        GUI.Box(new Rect(20, 20, 340, alto), GUIContent.none, _caja);
+        GUILayout.BeginArea(new Rect(34, 30, 320, alto - 10));
         GUILayout.Label("<b>Casilla Especial - Andares</b>", _estilo);
         GUILayout.Space(6);
-        GUILayout.Label($"Hora:  <b>{RelojSimulado()}</b>", _estilo);
+        GUILayout.Label($"Hora:  <b>{RelojSimulado()}</b>{(pausado ? "   PAUSA" : "")}", _estilo);
         GUILayout.Space(10);
         GUILayout.Label($"Llegaron:   <b>{llegados}</b>", _estilo);
         GUILayout.Label($"Votaron:    <b>{atendidos}</b>", _estilo);
         GUILayout.Label($"Rechazados: <b>{rechazados}</b>", _estilo);
+
+        DibujarControles();
+        DibujarFicha();
 
         if (jornadaTerminada)
         {
@@ -437,6 +670,62 @@ public class SimulationRunner : MonoBehaviour
             }
         }
         GUILayout.EndArea();
+    }
+
+    void DibujarControles()
+    {
+        GUILayout.Space(10);
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button(pausado ? "Seguir" : "Pausa", _boton,
+                             GUILayout.Width(88), GUILayout.Height(28)))
+            accionPendiente = Accion.TogglePausa;
+        if (GUILayout.Button("Sig. votante", _boton, GUILayout.Width(128), GUILayout.Height(28)))
+            accionPendiente = Accion.SiguienteVotante;
+        GUI.enabled = seleccionado >= 0 && IndiceDelProximoEvento() >= 0;
+        if (GUILayout.Button("Sig. evento", _boton, GUILayout.Width(100), GUILayout.Height(28)))
+            accionPendiente = Accion.SiguienteEvento;
+        GUI.enabled = true;
+        GUILayout.EndHorizontal();
+
+        GUILayout.Space(4);
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Velocidad:", _ficha, GUILayout.Width(96));
+        for (int i = 0; i < multiplicadores.Length; i++)
+        {
+            var estilo = i == multiplicadorActivo ? _botonActivo : _boton;
+            if (GUILayout.Button($"x{multiplicadores[i]:0.##}", estilo,
+                                 GUILayout.Width(52), GUILayout.Height(26)))
+            {
+                accionPendiente = Accion.CambiarVelocidad;
+                multiplicadorPedido = i;
+            }
+        }
+        GUILayout.EndHorizontal();
+    }
+
+    void DibujarFicha()
+    {
+        GUILayout.Space(8);
+        if (seleccionado < 0)
+        {
+            GUILayout.Label("Ningun votante seleccionado", _ficha);
+            return;
+        }
+
+        // Un backend viejo no manda edad ni voto; ahi la ficha muestra "?".
+        var f = fichaPorVotante.TryGetValue(seleccionado, out var fi) ? fi : null;
+        bool conDatos = f != null && f.edad > 0;
+        string edad = conDatos ? f.edad.ToString() : "?";
+        string voto = f != null && !string.IsNullOrEmpty(f.voto) ? f.voto : "?";
+        string mayor = conDatos ? (f.es_adulto_mayor ? "si" : "no") : "?";
+
+        GUILayout.Label($"<b>Votante {seleccionado}</b>   Edad: {edad}", _ficha);
+        GUILayout.Label($"Adulto mayor: {mayor}", _ficha);
+        GUILayout.Label($"Voto: {voto}", _ficha);
+        GUILayout.Label($"Estado: {EstadoDelSeleccionado(out float desde)}", _ficha);
+        GUILayout.Label(desde >= 0f ? $"Lleva: {simClock - desde:0.0} min" : " ", _ficha);
+        int i = IndiceDelProximoEvento();
+        GUILayout.Label(i >= 0 ? $"Sigue: {etiquetasDelSeleccionado[i]}" : "Sin mas eventos", _ficha);
     }
 
     // Enciende "Caminando" en quien tiene un movimiento activo, lo apaga en los demas.
@@ -470,6 +759,13 @@ public class SimulationRunner : MonoBehaviour
             {
                 if (e.@event == "EXIT") atendidos++;
                 else rechazados++;
+                if (e.voter == seleccionado)
+                {
+                    desenlaceSeleccionado = e.@event;
+                    // La camara se queda donde esta: devolverla de golpe seria peor.
+                    if (camara != null) camara.SoltarObjetivo();
+                }
+                inicioEstacion.Remove(e.voter);
                 if (voters.TryGetValue(e.voter, out var go)) Destroy(go);
                 voters.Remove(e.voter);
                 currentMove.Remove(e.voter);
@@ -582,6 +878,7 @@ public class SimulationRunner : MonoBehaviour
             if (e.@event == "SERVICE_START")
             {
                 SoltarLugarEnFila(e.voter);
+                inicioEstacion[e.voter] = e.t;
                 int slot = AssignSlot(e.voter, e.station);
                 var anchor = Anchor($"SLOT_{e.station.ToUpperInvariant()}_{slot:D2}");
                 // Solo la posicion del ancla; la rotacion del empty puede venir
@@ -596,6 +893,7 @@ public class SimulationRunner : MonoBehaviour
             }
             else if (e.@event == "SERVICE_END")
             {
+                inicioEstacion.Remove(e.voter);
                 ReleaseSlot(e.voter);
                 currentStation.Remove(e.voter);
             }
@@ -614,6 +912,9 @@ public class SimulationRunner : MonoBehaviour
         while (extIdx < ev.Count && ev[extIdx].t_start <= simClock)
         {
             var e = ev[extIdx++];
+            // Un salto de reloj puede tragarse dos eventos de golpe; sin apagar el
+            // anterior las luces se quedarian apagadas para siempre.
+            if (eventoActivo != null) AplicarEvento(eventoActivo.kind, false);
             eventoActivo = e;
             finEventoActivo = e.t_start + e.duration;
             AplicarEvento(e.kind, true);
@@ -641,26 +942,25 @@ public class SimulationRunner : MonoBehaviour
                 break;
 
             case "temblor":
-                if (activo) StartCoroutine(Temblor(finEventoActivo - simClock));
+                if (activo) StartCoroutine(Temblor());
                 break;
         }
     }
 
     // duracionMin llega en minutos SIMULADOS (misma unidad que simClock);
     // lo convertimos a segundos reales usando 'speed' (min simulado / seg real).
-    IEnumerator Temblor(float duracionMin)
+    // La sacudida vive en el reloj simulado, no en segundos reales: pausar la
+    // congela, x20 la acorta, y un salto que pase por encima la termina. De paso
+    // desaparece la division entre speed, que reventaba con la velocidad en cero.
+    IEnumerator Temblor()
     {
-        var camOriginal = Camera.main.transform.localPosition;
-        float duracionReal = duracionMin * 60f / speed;
-        float t = 0f;
-        while (t < duracionReal)
+        float fin = finEventoActivo;
+        while (simClock < fin)
         {
-            Camera.main.transform.localPosition =
-                camOriginal + (Vector3)(Random.insideUnitCircle * shakeMagnitud);
-            t += Time.deltaTime;
+            if (camara != null) camara.sacudidaActual = shakeMagnitud;
             yield return null;
         }
-        Camera.main.transform.localPosition = camOriginal;
+        if (camara != null) camara.sacudidaActual = 0f;
     }
 
     void ProcessMovements()

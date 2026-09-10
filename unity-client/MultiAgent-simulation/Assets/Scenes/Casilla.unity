@@ -384,6 +384,9 @@ MonoBehaviour:
   prefabMujer: {fileID: 7128341772623553415, guid: 3b570d313ec02cee79b92118b2d52350, type: 3}
   speed: 60
   yawOffset: 90
+  eventoForzado: 3
+  minutoDelEvento: 10
+  duracionDelEvento: 5
   lluviaVFX: {fileID: 1500429293}
   lucesCasilla: {fileID: 521687106}
   shakeMagnitud: 0.15
