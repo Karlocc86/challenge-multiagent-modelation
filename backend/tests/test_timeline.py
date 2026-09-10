@@ -104,7 +104,7 @@ def test_station_events_rename_start_and_done_to_service_start_and_end():
     assert all(set(e.keys()) == {"voter", "station", "event", "t"} for e in secretario_events)
 
 
-def test_voter_events_exclude_edad_and_voto():
+def test_voter_events_expose_edad_voto_and_adulto_mayor_on_arrival():
     model = CasillaModel(num_voters=0, rng=1, rejection_rate=0.0)
     model.schedule_callback(model._on_voter_arrival, at=0.1)
 
@@ -113,7 +113,45 @@ def test_voter_events_exclude_edad_and_voto():
     timeline = build_timeline(model)
 
     arrival = next(e for e in timeline["voter_events"] if e["event"] == "ARRIVAL")
-    assert set(arrival.keys()) == {"voter", "event", "t"}
+    assert set(arrival.keys()) == {
+        "voter",
+        "event",
+        "t",
+        "edad",
+        "es_adulto_mayor",
+        "voto",
+    }
+    logged = next(e for e in model.event_log if e["event"] == "ARRIVAL")
+    assert arrival["edad"] == logged["edad"]
+    assert arrival["voto"] == logged["voto"]
+    assert arrival["es_adulto_mayor"] == (arrival["edad"] >= 60)
+
+
+def test_voter_events_keep_exit_and_rejected_minimal():
+    # edad and voto live only on the ARRIVAL entry, so the other events report
+    # three keys rather than padding two nulls.
+    model = CasillaModel(num_voters=5, arrival_rate=0.5, rng=7, rejection_rate=0.0)
+    model.run_to_completion()
+
+    timeline = build_timeline(model)
+
+    others = [e for e in timeline["voter_events"] if e["event"] != "ARRIVAL"]
+    assert others
+    assert all(set(e.keys()) == {"voter", "event", "t"} for e in others)
+
+
+def test_rejected_voter_still_reports_its_details_on_arrival():
+    # A voter turned away at the secretario never votes, but the panel still has
+    # to be able to label them.
+    model = CasillaModel(num_voters=3, arrival_rate=0.5, rng=7, rejection_rate=1.0)
+    model.run_to_completion()
+
+    timeline = build_timeline(model)
+
+    assert any(e["event"] == "REJECTED" for e in timeline["voter_events"])
+    arrival = next(e for e in timeline["voter_events"] if e["event"] == "ARRIVAL")
+    assert arrival["voto"] in CANDIDATOS
+    assert 18 <= arrival["edad"] <= 90
 
 
 def test_external_events_rename_time_to_t_start():

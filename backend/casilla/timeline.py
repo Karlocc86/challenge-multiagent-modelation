@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .agents import CANDIDATOS
+from .agents import ADULTO_MAYOR_THRESHOLD, CANDIDATOS
 from .model import CasillaModel
 
 STATION_NAMES = ["secretario", "mesa", "casilla", "urna"]
@@ -150,11 +150,28 @@ def _build_station_events(model: CasillaModel) -> list[dict[str, Any]]:
 
 
 def _build_voter_events(model: CasillaModel) -> list[dict[str, Any]]:
-    return [
-        {"voter": entry["voter"], "event": entry["event"], "t": entry["time"]}
-        for entry in model.event_log
-        if entry["event"] in ("ARRIVAL", "REJECTED", "EXIT")
-    ]
+    """Arrivals, rejections and exits, with the voter's details on the arrival.
+
+    ``edad`` and ``voto`` only exist on the ARRIVAL entry of the log, so they are
+    reported there and nowhere else rather than padded onto the other events with
+    nulls. A client that wants to label a voter indexes them by voter number.
+    """
+    events = []
+    for entry in model.event_log:
+        if entry["event"] not in ("ARRIVAL", "REJECTED", "EXIT"):
+            continue
+        event = {
+            "voter": entry["voter"],
+            "event": entry["event"],
+            "t": entry["time"],
+        }
+        if "edad" in entry:
+            event["edad"] = entry["edad"]
+            # Derived here so the model stays unaware of anything but the age.
+            event["es_adulto_mayor"] = entry["edad"] >= ADULTO_MAYOR_THRESHOLD
+            event["voto"] = entry["voto"]
+        events.append(event)
+    return events
 
 
 def _build_external_events(model: CasillaModel) -> list[dict[str, Any]]:

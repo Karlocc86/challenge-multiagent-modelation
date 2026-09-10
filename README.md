@@ -179,6 +179,9 @@ curl -X POST http://127.0.0.1:5000/simulate \
 Respuesta `200`: objeto con las claves `summary`, `movements`, `queue_events`,
 `station_events`, `voter_events` y `external_events`.
 
+En `voter_events`, la entrada de `ARRIVAL` de cada votante trae además `edad`,
+`es_adulto_mayor` y `voto`; sus `REJECTED` y `EXIT` no los repiten.
+
 Respuesta `400`: parámetro inválido — `arrival_rate` o los `forced_event_*` en
 cero, negativos, no numéricos o no finitos, o un tipo de evento desconocido. El
 cuerpo trae el motivo:
