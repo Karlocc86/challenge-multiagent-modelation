@@ -373,7 +373,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SimulationRunner
   serverUrl: http://127.0.0.1:5000/simulate
-  numVoters: 50
+  numVoters: 1400
+  promedioLlegadasPorMinuto: 2
   seed: 7
   secretarioCapacity: 6
   mesaCapacity: 3
