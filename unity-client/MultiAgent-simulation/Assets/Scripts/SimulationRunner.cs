@@ -17,6 +17,12 @@ public class SimulationRunner : MonoBehaviour
     [Header("Servidor Flask")]
     public string serverUrl = "http://127.0.0.1:5000/simulate";
     public int numVoters = 50;
+    // double, no float: Newtonsoft manda ~7 digitos para un float, y Python leeria
+    // 0.3333333 en vez de 1/3, cambiando la corrida con la misma semilla.
+    [Tooltip("PROMEDIO de llegadas por minuto simulado. Los huecos entre llegada y " +
+             "llegada siguen siendo aleatorios alrededor de este promedio. Debe ser " +
+             "mayor que 0. 0.333 = una llegada cada 3 minutos en promedio.")]
+    public double promedioLlegadasPorMinuto = 1.0 / 3.0;
     public int seed = 7;
     public int secretarioCapacity = 6;
     public int mesaCapacity = 3;
@@ -124,6 +130,7 @@ public class SimulationRunner : MonoBehaviour
         var body = JsonConvert.SerializeObject(new
         {
             num_voters = numVoters,
+            arrival_rate = promedioLlegadasPorMinuto,
             seed,
             secretario_capacity = secretarioCapacity,
             mesa_capacity       = mesaCapacity,
@@ -137,6 +144,16 @@ public class SimulationRunner : MonoBehaviour
         req.SetRequestHeader("Content-Type", "application/json");
         yield return req.SendWebRequest();
 
+        // ProtocolError = si hubo respuesta HTTP, pero con codigo de error. Sin
+        // separarlo, un 400 por un parametro invalido se reportaba como si el
+        // servidor estuviera apagado.
+        if (req.result == UnityWebRequest.Result.ProtocolError)
+        {
+            Debug.LogError($"El backend rechazo la peticion (HTTP {req.responseCode}): " +
+                           MensajeDeError(req.downloadHandler.text));
+            yield break;
+        }
+
         if (req.result != UnityWebRequest.Result.Success)
         {
             Debug.LogError($"El backend no responde: {req.error}. ¿Corriendo 'python server.py' en {serverUrl}?");
@@ -147,6 +164,21 @@ public class SimulationRunner : MonoBehaviour
         Debug.Log($"Timeline recibido: {timeline.movements.Count} movimientos, " +
                   $"{timeline.station_events.Count} eventos de estacion, " +
                   $"{timeline.voter_events.Count} eventos de votante.");
+    }
+
+    // El backend reporta sus errores como {"error": "..."}. Un 500 inesperado
+    // llega como HTML (la pagina de debug de Flask): ahi mostramos el texto crudo.
+    static string MensajeDeError(string cuerpo)
+    {
+        if (string.IsNullOrWhiteSpace(cuerpo)) return "(respuesta vacia)";
+        try
+        {
+            var payload = JsonConvert.DeserializeObject<Dictionary<string, string>>(cuerpo);
+            if (payload != null && payload.TryGetValue("error", out var msg) && !string.IsNullOrEmpty(msg))
+                return msg;
+        }
+        catch (JsonException) { /* no era JSON con forma de error */ }
+        return cuerpo.Length > 300 ? cuerpo.Substring(0, 300) + "..." : cuerpo;
     }
 
     void Update()
