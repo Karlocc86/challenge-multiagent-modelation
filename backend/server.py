@@ -11,6 +11,7 @@ from flask import Flask, jsonify, request
 
 from casilla import CasillaModel
 from casilla.model import EXTERNAL_EVENT_KINDS
+from casilla.arrivals import validate_beta_mixture
 from casilla.timeline import build_timeline
 
 app = Flask(__name__)
@@ -40,7 +41,6 @@ def _positive_number(params, key, default):
         raise InvalidParameter(f"{key} debe ser mayor que 0; se recibio {value!r}.")
     return float(value)
 
-
 def _event_kind(params, key):
     """Read an optional external-event kind, restricted to the known set.
 
@@ -57,21 +57,35 @@ def _event_kind(params, key):
         )
     return value
 
-
 @app.route("/simulate", methods=["POST"])
 def simulate():
-    params = request.get_json(silent=True) or {}
+    params = request.get_json(silent=True)
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return jsonify({"error": "El cuerpo JSON debe ser un objeto."}), 400
     try:
-        arrival_rate = _positive_number(params, "arrival_rate", 1 / 3)
         forced_event_kind = _event_kind(params, "forced_event_kind")
         forced_event_time = _positive_number(params, "forced_event_time", None)
         forced_event_duration = _positive_number(params, "forced_event_duration", None)
-    except InvalidParameter as exc:
+        beta_mixture = params.get("arrival_beta")
+        if beta_mixture is not None:
+            beta_mixture = validate_beta_mixture(beta_mixture)
+        arrival_rate = (
+            _positive_number(params, "arrival_rate", 1 / 3)
+            if beta_mixture is None
+            else 1 / 3
+        )
+        count = params.get("num_voters", 200)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("num_voters debe ser un entero mayor o igual que 0.")
+    except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
     model = CasillaModel(
-        num_voters=params.get("num_voters", 200),
+        num_voters=count,
         arrival_rate=arrival_rate,
+        arrival_beta=beta_mixture,
         secretario_capacity=params.get("secretario_capacity", 1),
         mesa_capacity=params.get("mesa_capacity", 1),
         casilla_capacity=params.get("casilla_capacity", 1),
