@@ -6,6 +6,7 @@
 
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -51,7 +52,26 @@ public class SimulationRunner : MonoBehaviour
         public List<StationEvent> station_events;
         public List<VoterEvent> voter_events;
     }
-    [System.Serializable] class Summary { public float duration_minutes; public int voters_arrived; public int voters_exited; public int voters_rejected; }
+    [System.Serializable]
+    class Summary
+    {
+        public float duration_minutes;
+        public int voters_arrived;
+        public int voters_exited;
+        public int voters_rejected;
+        public Results results;
+    }
+    // Conteo de la urna. Solo cuenta a quien llego a la urna y salio: un
+    // votante rechazado en el secretario nunca deposita su voto.
+    [System.Serializable]
+    class Results
+    {
+        public Dictionary<string, int> votes_by_candidate;
+        public int total_votes;
+        public string winner;              // null si hubo empate o si nadie voto
+        public bool is_tie;
+        public List<string> tied_candidates;
+    }
     [System.Serializable] class Movement { public int voter; public string from; public string to; public float t_start; public float t_end; }
     [System.Serializable] class StationEvent { public int voter; public string station; public string @event; public float t; }
     [System.Serializable] class VoterEvent { public int voter; public string @event; public float t; }
@@ -163,8 +183,27 @@ public class SimulationRunner : MonoBehaviour
         return $"{h12:00}:{m:00} {ampm}";
     }
 
-    GUIStyle _estilo, _estiloFin, _caja;
+    GUIStyle _estilo, _estiloFin, _estiloGanador, _caja;
     Font _fuente;
+
+    // Arial solo existe en Windows/Mac; en Linux el equivalente metrico es
+    // Liberation Sans. Pedimos la primera que este REALMENTE instalada en vez
+    // de asumir, porque pedir una ausente deja el panel sin dibujar texto.
+    static Font CargarFuente(int size)
+    {
+        var instaladas = new HashSet<string>(Font.GetOSInstalledFontNames());
+        foreach (var nombre in new[] { "Arial", "Liberation Sans", "DejaVu Sans",
+                                       "Noto Sans", "Cantarell" })
+        {
+            if (instaladas.Contains(nombre))
+                return Font.CreateDynamicFontFromOSFont(nombre, size);
+        }
+        // Ninguna de las conocidas: usamos lo que haya antes de quedarnos sin texto.
+        var todas = Font.GetOSInstalledFontNames();
+        return todas != null && todas.Length > 0
+            ? Font.CreateDynamicFontFromOSFont(todas[0], size)
+            : null;
+    }
 
     void OnGUI()
     {
@@ -174,8 +213,7 @@ public class SimulationRunner : MonoBehaviour
         {
             // El OnGUI de Unity 6 en URP no encuentra fuente por defecto; le
             // asignamos una explicitamente para que el texto se dibuje.
-            _fuente = Font.CreateDynamicFontFromOSFont(
-                new[] { "Arial", "Liberation Sans", "DejaVu Sans", "Sans" }, 20);
+            _fuente = CargarFuente(20);
             _caja = new GUIStyle(GUI.skin.box);
             _estilo = new GUIStyle
             {
@@ -188,10 +226,26 @@ public class SimulationRunner : MonoBehaviour
                 fontSize = 22,
                 normal = { textColor = new Color(1f, 0.4f, 0.3f) }
             };
+            _estiloGanador = new GUIStyle(_estilo)
+            {
+                fontSize = 21,
+                normal = { textColor = new Color(0.45f, 1f, 0.55f) }
+            };
         }
 
-        GUI.Box(new Rect(20, 20, 300, jornadaTerminada ? 210 : 180), GUIContent.none, _caja);
-        GUILayout.BeginArea(new Rect(34, 30, 280, 200));
+        var res = timeline.summary != null ? timeline.summary.results : null;
+
+        // El panel crece segun cuantos candidatos haya, para no cortar texto.
+        int alto = 180;
+        if (jornadaTerminada)
+        {
+            alto += 40;
+            if (res != null && res.votes_by_candidate != null)
+                alto += 34 + res.votes_by_candidate.Count * 24 + 34;
+        }
+
+        GUI.Box(new Rect(20, 20, 300, alto), GUIContent.none, _caja);
+        GUILayout.BeginArea(new Rect(34, 30, 280, alto - 10));
         GUILayout.Label("<b>Casilla Especial - Andares</b>", _estilo);
         GUILayout.Space(6);
         GUILayout.Label($"Hora:  <b>{RelojSimulado()}</b>", _estilo);
@@ -199,10 +253,32 @@ public class SimulationRunner : MonoBehaviour
         GUILayout.Label($"Llegaron:   <b>{llegados}</b>", _estilo);
         GUILayout.Label($"Votaron:    <b>{atendidos}</b>", _estilo);
         GUILayout.Label($"Rechazados: <b>{rechazados}</b>", _estilo);
+
         if (jornadaTerminada)
         {
             GUILayout.Space(8);
             GUILayout.Label("JORNADA TERMINADA", _estiloFin);
+
+            // El backend viejo no manda "results"; el panel simplemente lo omite.
+            if (res != null && res.votes_by_candidate != null)
+            {
+                GUILayout.Space(8);
+                GUILayout.Label($"<b>Votos ({res.total_votes})</b>", _estilo);
+
+                foreach (var kv in res.votes_by_candidate.OrderByDescending(kv => kv.Value))
+                {
+                    float pct = res.total_votes > 0 ? 100f * kv.Value / res.total_votes : 0f;
+                    GUILayout.Label($"  {kv.Key}:  <b>{kv.Value}</b>  ({pct:0.0}%)", _estilo);
+                }
+
+                GUILayout.Space(6);
+                if (res.total_votes == 0)
+                    GUILayout.Label("Sin votos emitidos", _estiloFin);
+                else if (res.is_tie)
+                    GUILayout.Label($"EMPATE: {string.Join(" - ", res.tied_candidates)}", _estiloFin);
+                else
+                    GUILayout.Label($"GANADOR: {res.winner}", _estiloGanador);
+            }
         }
         GUILayout.EndArea();
     }
