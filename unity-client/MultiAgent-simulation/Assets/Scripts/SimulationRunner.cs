@@ -37,6 +37,14 @@ public class SimulationRunner : MonoBehaviour
     [Tooltip("Grados extra de giro en Y si los modelos miran al lado equivocado. Prueba 90, -90 o 180.")]
     public float yawOffset = 90f;
 
+    [Header("Eventos externos")]
+    [Tooltip("Particle System de lluvia. Colocalo sobre el patio/entrada, con 'Play On Awake' desactivado.")]
+    public ParticleSystem lluviaVFX;
+    [Tooltip("Luz(es) que se apagan durante un corte_de_luz.")]
+    public Light lucesCasilla;
+    [Tooltip("Que tanto se sacude la camara durante un temblor.")]
+    public float shakeMagnitud = 0.15f;
+
     [Header("Panel en pantalla")]
     [Tooltip("Hora simulada a la que arranca la jornada (24h). 8 = 8:00 AM.")]
     public int horaInicio = 8;
@@ -58,6 +66,7 @@ public class SimulationRunner : MonoBehaviour
         public List<QueueEvent> queue_events;
         public List<StationEvent> station_events;
         public List<VoterEvent> voter_events;
+        public List<ExternalEvent> external_events;
     }
     [System.Serializable]
     class Summary
@@ -94,6 +103,7 @@ public class SimulationRunner : MonoBehaviour
     }
     [System.Serializable] class StationEvent { public int voter; public string station; public string @event; public float t; }
     [System.Serializable] class VoterEvent { public int voter; public string @event; public float t; }
+    [System.Serializable] class ExternalEvent { public string kind; public float t_start; public float duration; }
 
     // -------------------------------------------------------------------
     // Estado en runtime
@@ -112,7 +122,9 @@ public class SimulationRunner : MonoBehaviour
     // acumuladas se calculan una vez porque las anclas no se mueven.
     readonly List<Vector3> rutaEntrada = new();
     readonly List<float> distanciaEnRuta = new();
-    int movIdx, staIdx, votIdx, colaIdx;
+    int movIdx, staIdx, votIdx, colaIdx, extIdx;
+    ExternalEvent eventoActivo;
+    float finEventoActivo;
 
     void Start()
     {
@@ -281,6 +293,7 @@ public class SimulationRunner : MonoBehaviour
         ProcessVoterEvents();
         ProcessQueueEvents();
         ProcessStationEvents();
+        ProcessExternalEvents();
         ProcessMovements();
         InterpolateActiveMoves();
         UpdateAnimators();
@@ -558,6 +571,67 @@ public class SimulationRunner : MonoBehaviour
                 currentStation.Remove(e.voter);
             }
         }
+    }
+
+    // Dispara el efecto visual cuando arranca un evento externo (kind = corte_de_luz
+    // | temblor | aguacero) y lo apaga cuando pasa su duracion. Los tres siguen
+    // siendo funcionalmente identicos en el backend (mismo pause/resume) - la
+    // diferencia vive solo aqui, en que hacemos con cada "kind".
+    void ProcessExternalEvents()
+    {
+        var ev = timeline.external_events;
+        if (ev == null) return;
+
+        while (extIdx < ev.Count && ev[extIdx].t_start <= simClock)
+        {
+            var e = ev[extIdx++];
+            eventoActivo = e;
+            finEventoActivo = e.t_start + e.duration;
+            AplicarEvento(e.kind, true);
+        }
+
+        if (eventoActivo != null && simClock >= finEventoActivo)
+        {
+            AplicarEvento(eventoActivo.kind, false);
+            eventoActivo = null;
+        }
+    }
+
+    void AplicarEvento(string kind, bool activo)
+    {
+        switch (kind)
+        {
+            case "aguacero":
+                if (lluviaVFX == null) break;
+                if (activo) lluviaVFX.Play();
+                else lluviaVFX.Stop();
+                break;
+
+            case "corte_de_luz":
+                if (lucesCasilla != null) lucesCasilla.enabled = !activo;
+                break;
+
+            case "temblor":
+                if (activo) StartCoroutine(Temblor(finEventoActivo - simClock));
+                break;
+        }
+    }
+
+    // duracionMin llega en minutos SIMULADOS (misma unidad que simClock);
+    // lo convertimos a segundos reales usando 'speed' (min simulado / seg real).
+    IEnumerator Temblor(float duracionMin)
+    {
+        var camOriginal = Camera.main.transform.localPosition;
+        float duracionReal = duracionMin * 60f / speed;
+        float t = 0f;
+        while (t < duracionReal)
+        {
+            Camera.main.transform.localPosition =
+                camOriginal + (Vector3)(Random.insideUnitCircle * shakeMagnitud);
+            t += Time.deltaTime;
+            yield return null;
+        }
+        Camera.main.transform.localPosition = camOriginal;
     }
 
     void ProcessMovements()
