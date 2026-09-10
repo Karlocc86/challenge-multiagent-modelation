@@ -382,6 +382,9 @@ MonoBehaviour:
   prefabHombre: {fileID: 5273517880495183775, guid: ceb35221f402a44febd4a3244e6ccab8, type: 3}
   prefabMujer: {fileID: 7128341772623553415, guid: 3b570d313ec02cee79b92118b2d52350, type: 3}
   speed: 60
+  yawOffset: 90
+  horaInicio: 8
+  mostrarPanel: 1
 --- !u!4 &1449732981 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: -8679921383154817045, guid: 4022a2bf0f1691162962aba2b36dc4fb, type: 3}
