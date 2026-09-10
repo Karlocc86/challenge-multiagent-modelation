@@ -12,6 +12,7 @@ import argparse
 import logging
 
 from casilla import CasillaModel
+from casilla.model import EXTERNAL_EVENT_KINDS
 
 
 def main() -> None:
@@ -26,6 +27,11 @@ def main() -> None:
     parser.add_argument("--casilla-capacity", type=int, default=1)
     parser.add_argument("--urna-capacity", type=int, default=1)
     parser.add_argument("--rejection-rate", type=float, default=0.02)
+    parser.add_argument(
+        "--forced-event-kind", choices=EXTERNAL_EVENT_KINDS, default=None
+    )
+    parser.add_argument("--forced-event-time", type=float, default=None)
+    parser.add_argument("--forced-event-duration", type=float, default=None)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -40,6 +46,9 @@ def main() -> None:
         casilla_capacity=args.casilla_capacity,
         urna_capacity=args.urna_capacity,
         rejection_rate=args.rejection_rate,
+        forced_event_kind=args.forced_event_kind,
+        forced_event_time=args.forced_event_time,
+        forced_event_duration=args.forced_event_duration,
         rng=args.seed,
     )
 

@@ -10,6 +10,7 @@ import math
 from flask import Flask, jsonify, request
 
 from casilla import CasillaModel
+from casilla.model import EXTERNAL_EVENT_KINDS
 from casilla.arrivals import validate_beta_mixture
 from casilla.timeline import build_timeline
 
@@ -40,6 +41,21 @@ def _positive_number(params, key, default):
         raise InvalidParameter(f"{key} debe ser mayor que 0; se recibio {value!r}.")
     return float(value)
 
+def _event_kind(params, key):
+    """Read an optional external-event kind, restricted to the known set.
+
+    Comparing against the list also catches numbers, lists and objects, so no
+    separate type check is needed.
+    """
+    if key not in params or params[key] is None:
+        return None
+    value = params[key]
+    if value not in EXTERNAL_EVENT_KINDS:
+        raise InvalidParameter(
+            f"{key} debe ser uno de: {', '.join(EXTERNAL_EVENT_KINDS)}; "
+            f"se recibio {value!r}."
+        )
+    return value
 
 @app.route("/simulate", methods=["POST"])
 def simulate():
@@ -49,6 +65,9 @@ def simulate():
     if not isinstance(params, dict):
         return jsonify({"error": "El cuerpo JSON debe ser un objeto."}), 400
     try:
+        forced_event_kind = _event_kind(params, "forced_event_kind")
+        forced_event_time = _positive_number(params, "forced_event_time", None)
+        forced_event_duration = _positive_number(params, "forced_event_duration", None)
         beta_mixture = params.get("arrival_beta")
         if beta_mixture is not None:
             beta_mixture = validate_beta_mixture(beta_mixture)
@@ -72,6 +91,9 @@ def simulate():
         casilla_capacity=params.get("casilla_capacity", 1),
         urna_capacity=params.get("urna_capacity", 1),
         rejection_rate=params.get("rejection_rate", 0.02),
+        forced_event_kind=forced_event_kind,
+        forced_event_time=forced_event_time,
+        forced_event_duration=forced_event_duration,
         rng=params.get("seed"),
     )
     model.run_to_completion()
