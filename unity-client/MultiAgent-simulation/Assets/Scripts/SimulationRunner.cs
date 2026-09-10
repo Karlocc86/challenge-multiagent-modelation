@@ -108,6 +108,10 @@ public class SimulationRunner : MonoBehaviour
     readonly Dictionary<string, int> nextSlot = new();      // reparto round-robin de slots
     readonly Dictionary<int, int> voterSlot = new();        // id -> slot asignado
     readonly Dictionary<int, QueueEvent> currentQueue = new(); // id -> fila en la que espera
+    // Zig-zag de la entrada: QUEUE_GENERAL_000..045, en orden. Las distancias
+    // acumuladas se calculan una vez porque las anclas no se mueven.
+    readonly List<Vector3> rutaEntrada = new();
+    readonly List<float> distanciaEnRuta = new();
     int movIdx, staIdx, votIdx, colaIdx;
 
     void Start()
@@ -137,6 +141,69 @@ public class SimulationRunner : MonoBehaviour
         }
         if (anchors.Count == 0)
             Debug.LogWarning("No encontre anclas. Asegurate de que el FBX este como hijo de este GameObject.");
+
+        ConstruirRutaEntrada();
+    }
+
+    // El zig-zag esta modelado como QUEUE_GENERAL_000, _001, ... en el orden en
+    // que se recorre. Lo guardamos como una polilinea con sus distancias
+    // acumuladas para poder interpolar a lo largo de ella a velocidad pareja.
+    void ConstruirRutaEntrada()
+    {
+        rutaEntrada.Clear();
+        distanciaEnRuta.Clear();
+        for (int i = 0; ; i++)
+        {
+            var t = Anchor($"QUEUE_GENERAL_{i:D3}");
+            if (!t) break;
+            rutaEntrada.Add(t.position);
+        }
+        if (rutaEntrada.Count == 0) return;
+
+        float acumulado = 0f;
+        distanciaEnRuta.Add(0f);
+        for (int i = 1; i < rutaEntrada.Count; i++)
+        {
+            acumulado += Vector3.Distance(rutaEntrada[i - 1], rutaEntrada[i]);
+            distanciaEnRuta.Add(acumulado);
+        }
+    }
+
+    // Camina de `desde` al zig-zag, lo recorre entero, y sale hacia `hasta`.
+    // `u` avanza parejo en distancia, no por tramo, para que no acelere en las
+    // vueltas cerradas.
+    void PuntoEnRutaEntrada(Vector3 desde, Vector3 hasta, float u,
+                            out Vector3 pos, out Vector3 dir)
+    {
+        float largoRuta = distanciaEnRuta[distanciaEnRuta.Count - 1];
+        float entrada = Vector3.Distance(desde, rutaEntrada[0]);
+        float salida = Vector3.Distance(rutaEntrada[rutaEntrada.Count - 1], hasta);
+        float total = entrada + largoRuta + salida;
+        float recorrido = Mathf.Clamp01(u) * total;
+
+        if (recorrido <= entrada)
+        {
+            float k = entrada > 0f ? recorrido / entrada : 1f;
+            pos = Vector3.Lerp(desde, rutaEntrada[0], k);
+            dir = rutaEntrada[0] - desde;
+            return;
+        }
+        if (recorrido >= entrada + largoRuta)
+        {
+            float k = salida > 0f ? (recorrido - entrada - largoRuta) / salida : 1f;
+            var ultimo = rutaEntrada[rutaEntrada.Count - 1];
+            pos = Vector3.Lerp(ultimo, hasta, k);
+            dir = hasta - ultimo;
+            return;
+        }
+
+        float dentro = recorrido - entrada;
+        int i = 1;
+        while (i < distanciaEnRuta.Count - 1 && distanciaEnRuta[i] < dentro) i++;
+        float d0 = distanciaEnRuta[i - 1], d1 = distanciaEnRuta[i];
+        float f = d1 > d0 ? (dentro - d0) / (d1 - d0) : 0f;
+        pos = Vector3.Lerp(rutaEntrada[i - 1], rutaEntrada[i], f);
+        dir = rutaEntrada[i] - rutaEntrada[i - 1];
     }
 
     IEnumerator FetchAndRun()
@@ -514,8 +581,19 @@ public class SimulationRunner : MonoBehaviour
             if (!a || !b) { terminados.Add(id); continue; }
 
             float u = Mathf.InverseLerp(m.t_start, m.t_end, simClock);
-            go.transform.position = Vector3.Lerp(a.position, b.position, u);
-            var dir = (b.position - a.position); dir.y = 0;
+            Vector3 punto, dir;
+            // Los que llegan recorren el zig-zag de la entrada en vez de cruzarlo
+            // en linea recta.
+            bool esLlegada = m.from.ToLowerInvariant() is "entrada" or "spawn";
+            if (esLlegada && rutaEntrada.Count > 0)
+                PuntoEnRutaEntrada(a.position, b.position, u, out punto, out dir);
+            else
+            {
+                punto = Vector3.Lerp(a.position, b.position, u);
+                dir = b.position - a.position;
+            }
+            go.transform.position = punto;
+            dir.y = 0;
             if (dir.sqrMagnitude > 0.001f)
             {
                 // LookRotation solo en horizontal, mas el offset del modelo.
@@ -534,7 +612,8 @@ public class SimulationRunner : MonoBehaviour
     Transform AnchorFor(string etapa, int voterId)
     {
         etapa = etapa.ToLowerInvariant();
-        if (etapa == "spawn")  return Anchor("SPAWN");
+        // El backend nombra el origen "entrada"; "spawn" se acepta por si acaso.
+        if (etapa == "entrada" || etapa == "spawn") return Anchor("SPAWN");
         if (etapa == "salida") return Anchor("EXIT");
         int slot = voterSlot.TryGetValue(voterId, out var s) ? s : 0;
         return Anchor($"SLOT_{etapa.ToUpperInvariant()}_{slot:D2}");
