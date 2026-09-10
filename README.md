@@ -172,7 +172,9 @@ Todos los campos del cuerpo son opcionales; sin cuerpo se usan los predeterminad
 | `casilla_capacity` | entero | `1` | Mamparas de votación simultáneas. |
 | `urna_capacity` | entero | `1` | Depósitos simultáneos en la urna. |
 | `rejection_rate` | número entre `0` y `1` | `0.02` | Probabilidad de rechazar la INE tras el secretario. |
-
+| `forced_event_kind` | `corte_de_luz`, `temblor`, `aguacero` o `null` | `null` | Fuerza el tipo de evento externo. Con `null` lo decide la semilla. |
+| `forced_event_time` | número > 0 o `null` | `null` | Minuto simulado en el que ocurre el evento. |
+| `forced_event_duration` | número > 0 o `null` | `null` | Cuánto dura el evento, en minutos simulados. |
 Ejemplo:
 
 ```bash
