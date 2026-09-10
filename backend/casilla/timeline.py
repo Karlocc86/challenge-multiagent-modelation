@@ -31,6 +31,7 @@ def _build_summary(model: CasillaModel) -> dict[str, Any]:
     event_types = [entry["event"] for entry in model.event_log]
     return {
         "duration_minutes": model.time,
+        "arrival_beta": model.arrival_beta,
         "voters_arrived": event_types.count("ARRIVAL"),
         "voters_exited": event_types.count("EXIT"),
         "voters_rejected": event_types.count("REJECTED"),

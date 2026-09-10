@@ -29,6 +29,11 @@ public class SimulationRunner : MonoBehaviour
     public int casillaCapacity = 8;
     public int urnaCapacity = 2;
 
+    [Header("Formula Beta de llegadas")]
+    [Tooltip("Usa 0.82 Beta(2,4) + 0.18 Beta(6,2) entre Hora Inicio y Hora Fin Beta.")]
+    public bool usarFormulaBeta = true;
+    [Range(1, 24)] public int horaFinBeta = 18;
+
     [Header("Prefabs y reproduccion")]
     public GameObject prefabHombre;
     public GameObject prefabMujer;
@@ -67,10 +72,14 @@ public class SimulationRunner : MonoBehaviour
     public int horaInicio = 8;
     [Tooltip("Mostrar el panel con reloj y contadores.")]
     public bool mostrarPanel = true;
+    [Tooltip("Mostrar una grafica sencilla con las llegadas de cada hora.")]
+    public bool mostrarGraficaLlegadas = true;
 
     // Contadores en vivo (se recalculan cada frame desde los eventos ya ocurridos).
     int llegados, atendidos, rechazados;
     bool jornadaTerminada;
+    int[] llegadasPorHora;
+    int maxLlegadasEnUnaHora;
 
     // -------------------------------------------------------------------
     // Contrato JSON del backend
@@ -89,6 +98,7 @@ public class SimulationRunner : MonoBehaviour
     class Summary
     {
         public float duration_minutes;
+        public Newtonsoft.Json.Linq.JObject arrival_beta;
         public int voters_arrived;
         public int voters_exited;
         public int voters_rejected;
@@ -237,10 +247,21 @@ public class SimulationRunner : MonoBehaviour
 
     IEnumerator FetchAndRun()
     {
+        object formulaBeta = usarFormulaBeta ? new
+        {
+            start_hour = horaInicio,
+            end_hour = horaFinBeta,
+            components = new[]
+            {
+                new { weight = 0.82, alpha = 2.0, beta = 4.0 },
+                new { weight = 0.18, alpha = 6.0, beta = 2.0 }
+            }
+        } : null;
         var body = JsonConvert.SerializeObject(new
         {
             num_voters = numVoters,
             arrival_rate = promedioLlegadasPorMinuto,
+            arrival_beta = formulaBeta,
             seed,
             secretario_capacity = secretarioCapacity,
             mesa_capacity       = mesaCapacity,
@@ -276,9 +297,16 @@ public class SimulationRunner : MonoBehaviour
         }
 
         timeline = JsonConvert.DeserializeObject<Timeline>(req.downloadHandler.text);
+        if (usarFormulaBeta && timeline?.summary?.arrival_beta == null)
+        {
+            timeline = null;
+            Debug.LogError("El servidor no reconoce la formula Beta. Ejecuta backend/server.py de esta copia.");
+            yield break;
+        }
         Debug.Log($"Timeline recibido: {timeline.movements.Count} movimientos, " +
                   $"{timeline.station_events.Count} eventos de estacion, " +
                   $"{timeline.voter_events.Count} eventos de votante.");
+        PrepararLlegadasPorHora();
     }
 
     // El inspector usa nombres legibles; el contrato del backend usa los suyos.
@@ -287,8 +315,37 @@ public class SimulationRunner : MonoBehaviour
         EventoExternoForzado.CorteDeLuz => "corte_de_luz",
         EventoExternoForzado.Temblor    => "temblor",
         EventoExternoForzado.Aguacero   => "aguacero",
-        _                               => null,   // Aleatorio: no se fuerza
+        _                               => null,
     };
+
+    // Agrupa una sola vez los ARRIVAL que ya entrego el backend. La grafica usa
+    // estos resultados completos; Speed solo cambia la reproduccion visual.
+    void PrepararLlegadasPorHora()
+    {
+        if (timeline?.voter_events == null) return;
+        float ultimaLlegada = 0f;
+        foreach (var e in timeline.voter_events)
+            if (e.@event == "ARRIVAL") ultimaLlegada = Mathf.Max(ultimaLlegada, e.t);
+
+        int horas = usarFormulaBeta
+            ? horaFinBeta - horaInicio
+            : Mathf.Max(1, Mathf.CeilToInt(ultimaLlegada / 60f));
+        if (horas <= 0) return;
+        llegadasPorHora = new int[horas];
+        foreach (var e in timeline.voter_events)
+        {
+            if (e.@event != "ARRIVAL") continue;
+            int indice = Mathf.FloorToInt(e.t / 60f);
+            if (0 <= indice && indice < llegadasPorHora.Length) llegadasPorHora[indice]++;
+        }
+        maxLlegadasEnUnaHora = llegadasPorHora.Max();
+
+        if (usarFormulaBeta)
+            Debug.Log("Formula Beta confirmada: 0.82 Beta(2,4) + 0.18 Beta(6,2), " +
+                      $"horario {horaInicio:00}:00-{horaFinBeta:00}:00.");
+        for (int i = 0; i < llegadasPorHora.Length; i++)
+            Debug.Log($"Llegadas {horaInicio + i:00}:00-{horaInicio + i + 1:00}:00: {llegadasPorHora[i]}");
+    }
 
     // El backend reporta sus errores como {"error": "..."}. Un 500 inesperado
     // llega como HTML (la pagina de debug de Flask): ahi mostramos el texto crudo.
@@ -341,7 +398,8 @@ public class SimulationRunner : MonoBehaviour
         return $"{h12:00}:{m:00} {ampm}";
     }
 
-    GUIStyle _estilo, _estiloFin, _estiloGanador, _caja;
+    GUIStyle _estilo, _estiloFin, _estiloGanador, _estiloGrafica,
+             _estiloGraficaPequeno, _estiloGraficaCentro, _caja;
     Font _fuente;
 
     // Arial solo existe en Windows/Mac; en Linux el equivalente metrico es
@@ -388,6 +446,12 @@ public class SimulationRunner : MonoBehaviour
             {
                 fontSize = 21,
                 normal = { textColor = new Color(0.45f, 1f, 0.55f) }
+            };
+            _estiloGrafica = new GUIStyle(_estilo) { fontSize = 18 };
+            _estiloGraficaPequeno = new GUIStyle(_estilo) { fontSize = 13 };
+            _estiloGraficaCentro = new GUIStyle(_estiloGraficaPequeno)
+            {
+                alignment = TextAnchor.UpperCenter
             };
         }
 
@@ -439,6 +503,78 @@ public class SimulationRunner : MonoBehaviour
             }
         }
         GUILayout.EndArea();
+        if (jornadaTerminada)
+            DibujarGraficaLlegadas();
+    }
+
+    void DibujarGraficaLlegadas()
+    {
+        if (!mostrarGraficaLlegadas || llegadasPorHora == null ||
+            llegadasPorHora.Length == 0 || maxLlegadasEnUnaHora <= 0) return;
+
+        float ancho = Mathf.Min(760f, Screen.width - 360f);
+        if (ancho < 400f) return;
+        const float alto = 330f;
+        float x = Screen.width - ancho - 20f;
+        float y = 20f;
+        GUI.Box(new Rect(x, y, ancho, alto), GUIContent.none, _caja);
+        GUI.Label(new Rect(x + 15, y + 10, ancho - 30, 26),
+                  "<b>Llegadas por hora (corrida completa)</b>", _estiloGrafica);
+
+        string modo = usarFormulaBeta
+            ? $"Beta 08:00-{horaFinBeta:00}:00"
+            : $"Poisson {promedioLlegadasPorMinuto:0.##}/min";
+        GUI.Label(new Rect(x + 15, y + 38, ancho - 30, 22),
+                  $"Modo: {modo}   |   Semilla: {seed}   |   Personas: {numVoters}",
+                  _estiloGraficaPequeno);
+        GUI.Label(new Rect(x + 15, y + 58, ancho - 30, 22),
+                  $"Capacidades S/M/C/U: {secretarioCapacity}/{mesaCapacity}/{casillaCapacity}/{urnaCapacity}",
+                  _estiloGraficaPequeno);
+
+        string evento = "Evento externo: ninguno";
+        if (timeline.external_events != null && timeline.external_events.Count > 0)
+        {
+            var e = timeline.external_events[0];
+            evento = $"Evento externo: {e.kind.Replace('_', ' ')} a las " +
+                     $"{HoraCorta(e.t_start)} ({e.duration:0.0} min)";
+        }
+        GUI.Label(new Rect(x + 15, y + 78, ancho - 30, 22), evento, _estiloGraficaPequeno);
+
+        float graficaX = x + 35f;
+        float graficaY = y + 112f;
+        float graficaAncho = ancho - 55f;
+        const float graficaAlto = 165f;
+        Color colorAnterior = GUI.color;
+        GUI.color = new Color(1f, 1f, 1f, 0.45f);
+        GUI.DrawTexture(new Rect(graficaX, graficaY + graficaAlto, graficaAncho, 2f),
+                        Texture2D.whiteTexture);
+
+        float espacio = graficaAncho / llegadasPorHora.Length;
+        float barraAncho = Mathf.Max(4f, espacio * 0.68f);
+        for (int i = 0; i < llegadasPorHora.Length; i++)
+        {
+            float barraAlto = graficaAlto * llegadasPorHora[i] / maxLlegadasEnUnaHora;
+            float barraX = graficaX + i * espacio + (espacio - barraAncho) / 2f;
+            float barraY = graficaY + graficaAlto - barraAlto;
+            GUI.color = new Color(0.18f, 0.75f, 1f, 0.92f);
+            GUI.DrawTexture(new Rect(barraX, barraY, barraAncho, barraAlto),
+                            Texture2D.whiteTexture);
+            GUI.color = colorAnterior;
+            GUI.Label(new Rect(barraX - 6f, barraY - 19f, barraAncho + 12f, 18f),
+                      llegadasPorHora[i].ToString(), _estiloGraficaCentro);
+            GUI.Label(new Rect(graficaX + i * espacio, graficaY + graficaAlto + 5f,
+                               espacio, 20f),
+                      $"{(horaInicio + i) % 24:00}", _estiloGraficaCentro);
+        }
+        GUI.color = colorAnterior;
+        GUI.Label(new Rect(graficaX, graficaY + graficaAlto + 27f, graficaAncho, 20f),
+                  "Hora de inicio de cada intervalo", _estiloGraficaCentro);
+    }
+
+    string HoraCorta(float minutosDesdeInicio)
+    {
+        int total = horaInicio * 60 + Mathf.FloorToInt(minutosDesdeInicio);
+        return $"{(total / 60) % 24:00}:{total % 60:00}";
     }
 
     // Enciende "Caminando" en quien tiene un movimiento activo, lo apaga en los demas.
