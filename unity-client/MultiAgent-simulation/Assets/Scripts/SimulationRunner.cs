@@ -37,11 +37,13 @@ public class SimulationRunner : MonoBehaviour
     [Tooltip("Grados extra de giro en Y si los modelos miran al lado equivocado. Prueba 90, -90 o 180.")]
     public float yawOffset = 90f;
 
-    [Header("Eventos externos")]
     // Un enum publico se dibuja como desplegable en el inspector, asi que no hay
-    // forma de escribir un tipo que el backend no conozca.
+    // forma de escribir un tipo que el backend no conozca. Va antes del [Header]
+    // porque ese atributo solo es valido sobre campos, no sobre una declaracion
+    // de tipo.
     public enum EventoExternoForzado { Aleatorio, CorteDeLuz, Temblor, Aguacero }
 
+    [Header("Eventos externos")]
     [Tooltip("Aleatorio = lo decide la semilla, como siempre. Cualquier otro valor " +
              "fuerza ese evento sin cambiar el resto de la corrida: misma semilla, " +
              "misma gente, distinto clima.")]
