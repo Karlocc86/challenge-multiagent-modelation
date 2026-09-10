@@ -57,6 +57,9 @@ class CasillaModel(Model):
         casilla_capacity: int = 1,
         urna_capacity: int = 1,
         rejection_rate: float = 0.02,
+        forced_event_kind: str | None = None,
+        forced_event_time: float | None = None,
+        forced_event_duration: float | None = None,
         rng: int | None = None,
     ) -> None:
         super().__init__(rng=rng)
@@ -71,6 +74,11 @@ class CasillaModel(Model):
         self.event_log: list[dict] = []
         self.last_scheduled_arrival_time: float | None = None
         self.rejection_rate = rejection_rate
+        # None keeps the external event random. Forcing one lets a demo show a
+        # specific kind on cue instead of hunting for a seed that produces it.
+        self.forced_event_kind = forced_event_kind
+        self.forced_event_time = forced_event_time
+        self.forced_event_duration = forced_event_duration
 
         self.secretario = Station(
             self,
@@ -226,6 +234,16 @@ class CasillaModel(Model):
         )
         kind = self.random.choice(EXTERNAL_EVENT_KINDS)
         duration = self.random.uniform(3.0, 10.0)
+        # Every draw above happens even when its value is about to be discarded.
+        # They sit between the arrival draws and every draw the run itself makes,
+        # so skipping one would shift the whole rest of the run: forcing the kind
+        # has to leave the same seed producing the same people.
+        if self.forced_event_time is not None:
+            trigger_time = self.forced_event_time
+        if self.forced_event_kind is not None:
+            kind = self.forced_event_kind
+        if self.forced_event_duration is not None:
+            duration = self.forced_event_duration
         self.schedule_callback(
             functools.partial(self._trigger_external_event, kind, duration),
             at=trigger_time,
