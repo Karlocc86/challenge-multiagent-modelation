@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .agents import CANDIDATOS
 from .model import CasillaModel
 
 STATION_NAMES = ["secretario", "mesa", "casilla", "urna"]
@@ -33,6 +34,7 @@ def _build_summary(model: CasillaModel) -> dict[str, Any]:
         "voters_arrived": event_types.count("ARRIVAL"),
         "voters_exited": event_types.count("EXIT"),
         "voters_rejected": event_types.count("REJECTED"),
+        "results": _build_results(model),
         "stations": {
             name: {
                 "capacity": getattr(model, name).capacity,
@@ -40,6 +42,55 @@ def _build_summary(model: CasillaModel) -> dict[str, Any]:
             }
             for name in STATION_NAMES
         },
+    }
+
+
+def _build_results(model: CasillaModel) -> dict[str, Any]:
+    """Tally the votes actually cast and decide the winner.
+
+    A ballot only counts once its voter clears the urna and leaves, so we
+    tally the EXIT events rather than the ARRIVAL ones: a voter rejected at
+    the secretario carries a ``voto`` but never deposits it, and one still
+    inside the casilla when the run ends has not deposited it yet.
+
+    Every name in CANDIDATOS is reported even at zero votes, so the shape of
+    ``votes_by_candidate`` stays stable for clients regardless of the run.
+    """
+    # `voto` is only written on the ARRIVAL entry, so the ballot has to be
+    # looked up by voter number when that voter's EXIT shows up.
+    ballots = {
+        entry["voter"]: entry["voto"]
+        for entry in model.event_log
+        if entry["event"] == "ARRIVAL"
+    }
+
+    votes = dict.fromkeys(CANDIDATOS, 0)
+    for entry in model.event_log:
+        if entry["event"] != "EXIT":
+            continue
+        # A voter placed straight into a station (as tests do) never logged
+        # an ARRIVAL, so there is no ballot to count rather than a crash.
+        candidate = ballots.get(entry["voter"])
+        if candidate is None:
+            continue
+        # A candidate dropped from CANDIDATOS mid-run would not be pre-seeded.
+        votes[candidate] = votes.get(candidate, 0) + 1
+
+    total = sum(votes.values())
+    top = max(votes.values(), default=0)
+    # With no votes at all there is nothing to win, so the leaders list stays
+    # empty instead of naming every candidate as tied at zero.
+    leaders = (
+        sorted(name for name, count in votes.items() if count == top) if total else []
+    )
+    is_tie = len(leaders) > 1
+
+    return {
+        "votes_by_candidate": votes,
+        "total_votes": total,
+        "winner": None if is_tie or not leaders else leaders[0],
+        "is_tie": is_tie,
+        "tied_candidates": leaders if is_tie else [],
     }
 
 
