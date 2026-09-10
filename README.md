@@ -140,6 +140,52 @@ Ejemplo para explorar el efecto de un cuello de botella:
 .\.venv\Scripts\python.exe main.py --num-voters 1400 --casilla-capacity 3 --seed 7
 ```
 
+## API HTTP (POST /simulate)
+
+El backend expone un único endpoint. Corre la simulación completa del lado del
+servidor y devuelve la línea de tiempo entera en una sola respuesta, para que
+Unity la reproduzca sin volver a consultar.
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe server.py
+```
+
+Petición: `POST http://127.0.0.1:5000/simulate` con `Content-Type: application/json`.
+Todos los campos del cuerpo son opcionales; sin cuerpo se usan los predeterminados.
+
+| Campo | Tipo | Predeterminado | Descripción |
+|---|---|---|---|
+| `num_voters` | entero | `200` | Número de llegadas a programar. |
+| `arrival_rate` | número > 0 | `0.3333…` (`1/3`) | **Promedio** de llegadas por minuto simulado. Los huecos entre llegadas siguen siendo aleatorios alrededor de este valor. |
+| `seed` | entero o `null` | `null` | Semilla para repetir una ejecución. |
+| `secretario_capacity` | entero | `1` | Atenciones simultáneas en el secretario. |
+| `mesa_capacity` | entero | `1` | Atenciones simultáneas en la mesa. |
+| `casilla_capacity` | entero | `1` | Mamparas de votación simultáneas. |
+| `urna_capacity` | entero | `1` | Depósitos simultáneos en la urna. |
+| `rejection_rate` | número entre `0` y `1` | `0.02` | Probabilidad de rechazar la INE tras el secretario. |
+
+Ejemplo:
+
+```bash
+curl -X POST http://127.0.0.1:5000/simulate \
+  -H "Content-Type: application/json" \
+  -d '{"num_voters": 30, "arrival_rate": 0.5, "seed": 7}'
+```
+
+Respuesta `200`: objeto con las claves `summary`, `movements`, `queue_events`,
+`station_events`, `voter_events` y `external_events`.
+
+Respuesta `400`: `arrival_rate` inválido (cero, negativo, no numérico o no
+finito). El cuerpo trae el motivo:
+
+```json
+{"error": "arrival_rate debe ser mayor que 0; se recibio 0."}
+```
+
+Los nombres son consistentes con el CLI: `--arrival-rate` ↔ `arrival_rate` ↔ el
+argumento `arrival_rate` de `CasillaModel`, con el mismo predeterminado `1/3`.
+
 ## Ejecutar las pruebas
 
 ```powershell
