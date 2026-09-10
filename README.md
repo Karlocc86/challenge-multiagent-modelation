@@ -164,6 +164,9 @@ Todos los campos del cuerpo son opcionales; sin cuerpo se usan los predeterminad
 | `casilla_capacity` | entero | `1` | Mamparas de votación simultáneas. |
 | `urna_capacity` | entero | `1` | Depósitos simultáneos en la urna. |
 | `rejection_rate` | número entre `0` y `1` | `0.02` | Probabilidad de rechazar la INE tras el secretario. |
+| `forced_event_kind` | `corte_de_luz`, `temblor`, `aguacero` o `null` | `null` | Fuerza el tipo de evento externo. Con `null` lo decide la semilla. |
+| `forced_event_time` | número > 0 o `null` | `null` | Minuto simulado en el que ocurre el evento. |
+| `forced_event_duration` | número > 0 o `null` | `null` | Cuánto dura el evento, en minutos simulados. |
 
 Ejemplo:
 
@@ -176,8 +179,9 @@ curl -X POST http://127.0.0.1:5000/simulate \
 Respuesta `200`: objeto con las claves `summary`, `movements`, `queue_events`,
 `station_events`, `voter_events` y `external_events`.
 
-Respuesta `400`: `arrival_rate` inválido (cero, negativo, no numérico o no
-finito). El cuerpo trae el motivo:
+Respuesta `400`: parámetro inválido — `arrival_rate` o los `forced_event_*` en
+cero, negativos, no numéricos o no finitos, o un tipo de evento desconocido. El
+cuerpo trae el motivo:
 
 ```json
 {"error": "arrival_rate debe ser mayor que 0; se recibio 0."}
