@@ -22,7 +22,7 @@ from mesa import Agent
 logger = logging.getLogger(__name__)
 
 ADULTO_MAYOR_THRESHOLD = 60
-CANDIDATOS = ["A", "B", "C"]
+CANDIDATOS = ["PAN", "Movimiento Ciudadano", "Morena"]
 CANDIDATO_WEIGHTS = None  # None = equal probability for every candidate
 
 
