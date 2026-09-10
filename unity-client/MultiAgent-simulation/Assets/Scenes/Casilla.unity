@@ -375,6 +375,8 @@ MonoBehaviour:
   serverUrl: http://127.0.0.1:5000/simulate
   numVoters: 1400
   promedioLlegadasPorMinuto: 2
+  usarFormulaBeta: 1
+  horaFinBeta: 18
   seed: 7
   secretarioCapacity: 6
   mesaCapacity: 3
@@ -389,6 +391,7 @@ MonoBehaviour:
   shakeMagnitud: 0.15
   horaInicio: 8
   mostrarPanel: 1
+  mostrarGraficaLlegadas: 1
 --- !u!4 &1449732981 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: -8679921383154817045, guid: 4022a2bf0f1691162962aba2b36dc4fb, type: 3}
