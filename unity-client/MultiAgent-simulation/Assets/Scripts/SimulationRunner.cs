@@ -17,6 +17,12 @@ public class SimulationRunner : MonoBehaviour
     [Header("Servidor Flask")]
     public string serverUrl = "http://127.0.0.1:5000/simulate";
     public int numVoters = 50;
+    // double, no float: Newtonsoft manda ~7 digitos para un float, y Python leeria
+    // 0.3333333 en vez de 1/3, cambiando la corrida con la misma semilla.
+    [Tooltip("PROMEDIO de llegadas por minuto simulado. Los huecos entre llegada y " +
+             "llegada siguen siendo aleatorios alrededor de este promedio. Debe ser " +
+             "mayor que 0. 0.333 = una llegada cada 3 minutos en promedio.")]
+    public double promedioLlegadasPorMinuto = 1.0 / 3.0;
     public int seed = 7;
     public int secretarioCapacity = 6;
     public int mesaCapacity = 3;
@@ -57,6 +63,7 @@ public class SimulationRunner : MonoBehaviour
     {
         public Summary summary;
         public List<Movement> movements;
+        public List<QueueEvent> queue_events;
         public List<StationEvent> station_events;
         public List<VoterEvent> voter_events;
         public List<ExternalEvent> external_events;
@@ -82,6 +89,18 @@ public class SimulationRunner : MonoBehaviour
         public List<string> tied_candidates;
     }
     [System.Serializable] class Movement { public int voter; public string from; public string to; public float t_start; public float t_end; }
+    // Un votante formado. `position` es su lugar en la fila de esa estacion, y
+    // `queue_type` distingue la fila de adultos mayores de la general.
+    [System.Serializable]
+    class QueueEvent
+    {
+        public int voter;
+        public string station;
+        public string queue_type;
+        public int position;
+        public float t_join;
+        public float t_leave;
+    }
     [System.Serializable] class StationEvent { public int voter; public string station; public string @event; public float t; }
     [System.Serializable] class VoterEvent { public int voter; public string @event; public float t; }
     [System.Serializable] class ExternalEvent { public string kind; public float t_start; public float duration; }
@@ -98,7 +117,12 @@ public class SimulationRunner : MonoBehaviour
     readonly Dictionary<string, int[]> capacities = new();
     readonly Dictionary<string, int> nextSlot = new();      // reparto round-robin de slots
     readonly Dictionary<int, int> voterSlot = new();        // id -> slot asignado
-    int movIdx, staIdx, votIdx, extIdx;
+    readonly Dictionary<int, QueueEvent> currentQueue = new(); // id -> fila en la que espera
+    // Zig-zag de la entrada: QUEUE_GENERAL_000..045, en orden. Las distancias
+    // acumuladas se calculan una vez porque las anclas no se mueven.
+    readonly List<Vector3> rutaEntrada = new();
+    readonly List<float> distanciaEnRuta = new();
+    int movIdx, staIdx, votIdx, colaIdx, extIdx;
     ExternalEvent eventoActivo;
     float finEventoActivo;
 
@@ -129,6 +153,69 @@ public class SimulationRunner : MonoBehaviour
         }
         if (anchors.Count == 0)
             Debug.LogWarning("No encontre anclas. Asegurate de que el FBX este como hijo de este GameObject.");
+
+        ConstruirRutaEntrada();
+    }
+
+    // El zig-zag esta modelado como QUEUE_GENERAL_000, _001, ... en el orden en
+    // que se recorre. Lo guardamos como una polilinea con sus distancias
+    // acumuladas para poder interpolar a lo largo de ella a velocidad pareja.
+    void ConstruirRutaEntrada()
+    {
+        rutaEntrada.Clear();
+        distanciaEnRuta.Clear();
+        for (int i = 0; ; i++)
+        {
+            var t = Anchor($"QUEUE_GENERAL_{i:D3}");
+            if (!t) break;
+            rutaEntrada.Add(t.position);
+        }
+        if (rutaEntrada.Count == 0) return;
+
+        float acumulado = 0f;
+        distanciaEnRuta.Add(0f);
+        for (int i = 1; i < rutaEntrada.Count; i++)
+        {
+            acumulado += Vector3.Distance(rutaEntrada[i - 1], rutaEntrada[i]);
+            distanciaEnRuta.Add(acumulado);
+        }
+    }
+
+    // Camina de `desde` al zig-zag, lo recorre entero, y sale hacia `hasta`.
+    // `u` avanza parejo en distancia, no por tramo, para que no acelere en las
+    // vueltas cerradas.
+    void PuntoEnRutaEntrada(Vector3 desde, Vector3 hasta, float u,
+                            out Vector3 pos, out Vector3 dir)
+    {
+        float largoRuta = distanciaEnRuta[distanciaEnRuta.Count - 1];
+        float entrada = Vector3.Distance(desde, rutaEntrada[0]);
+        float salida = Vector3.Distance(rutaEntrada[rutaEntrada.Count - 1], hasta);
+        float total = entrada + largoRuta + salida;
+        float recorrido = Mathf.Clamp01(u) * total;
+
+        if (recorrido <= entrada)
+        {
+            float k = entrada > 0f ? recorrido / entrada : 1f;
+            pos = Vector3.Lerp(desde, rutaEntrada[0], k);
+            dir = rutaEntrada[0] - desde;
+            return;
+        }
+        if (recorrido >= entrada + largoRuta)
+        {
+            float k = salida > 0f ? (recorrido - entrada - largoRuta) / salida : 1f;
+            var ultimo = rutaEntrada[rutaEntrada.Count - 1];
+            pos = Vector3.Lerp(ultimo, hasta, k);
+            dir = hasta - ultimo;
+            return;
+        }
+
+        float dentro = recorrido - entrada;
+        int i = 1;
+        while (i < distanciaEnRuta.Count - 1 && distanciaEnRuta[i] < dentro) i++;
+        float d0 = distanciaEnRuta[i - 1], d1 = distanciaEnRuta[i];
+        float f = d1 > d0 ? (dentro - d0) / (d1 - d0) : 0f;
+        pos = Vector3.Lerp(rutaEntrada[i - 1], rutaEntrada[i], f);
+        dir = rutaEntrada[i] - rutaEntrada[i - 1];
     }
 
     IEnumerator FetchAndRun()
@@ -136,6 +223,7 @@ public class SimulationRunner : MonoBehaviour
         var body = JsonConvert.SerializeObject(new
         {
             num_voters = numVoters,
+            arrival_rate = promedioLlegadasPorMinuto,
             seed,
             secretario_capacity = secretarioCapacity,
             mesa_capacity       = mesaCapacity,
@@ -149,6 +237,16 @@ public class SimulationRunner : MonoBehaviour
         req.SetRequestHeader("Content-Type", "application/json");
         yield return req.SendWebRequest();
 
+        // ProtocolError = si hubo respuesta HTTP, pero con codigo de error. Sin
+        // separarlo, un 400 por un parametro invalido se reportaba como si el
+        // servidor estuviera apagado.
+        if (req.result == UnityWebRequest.Result.ProtocolError)
+        {
+            Debug.LogError($"El backend rechazo la peticion (HTTP {req.responseCode}): " +
+                           MensajeDeError(req.downloadHandler.text));
+            yield break;
+        }
+
         if (req.result != UnityWebRequest.Result.Success)
         {
             Debug.LogError($"El backend no responde: {req.error}. ¿Corriendo 'python server.py' en {serverUrl}?");
@@ -159,6 +257,21 @@ public class SimulationRunner : MonoBehaviour
         Debug.Log($"Timeline recibido: {timeline.movements.Count} movimientos, " +
                   $"{timeline.station_events.Count} eventos de estacion, " +
                   $"{timeline.voter_events.Count} eventos de votante.");
+    }
+
+    // El backend reporta sus errores como {"error": "..."}. Un 500 inesperado
+    // llega como HTML (la pagina de debug de Flask): ahi mostramos el texto crudo.
+    static string MensajeDeError(string cuerpo)
+    {
+        if (string.IsNullOrWhiteSpace(cuerpo)) return "(respuesta vacia)";
+        try
+        {
+            var payload = JsonConvert.DeserializeObject<Dictionary<string, string>>(cuerpo);
+            if (payload != null && payload.TryGetValue("error", out var msg) && !string.IsNullOrEmpty(msg))
+                return msg;
+        }
+        catch (JsonException) { /* no era JSON con forma de error */ }
+        return cuerpo.Length > 300 ? cuerpo.Substring(0, 300) + "..." : cuerpo;
     }
 
     void Update()
@@ -178,6 +291,7 @@ public class SimulationRunner : MonoBehaviour
         }
 
         ProcessVoterEvents();
+        ProcessQueueEvents();
         ProcessStationEvents();
         ProcessExternalEvents();
         ProcessMovements();
@@ -331,9 +445,101 @@ public class SimulationRunner : MonoBehaviour
                 voters.Remove(e.voter);
                 currentMove.Remove(e.voter);
                 currentStation.Remove(e.voter);
+                SoltarLugarEnFila(e.voter);
                 ReleaseSlot(e.voter);
             }
         }
+    }
+
+    // Coloca a cada votante formado en su lugar de la fila. Sin esto todos los
+    // que esperan se quedan encimados en el escritorio de la estacion, porque su
+    // ultimo movimiento los dejo ahi y nada los vuelve a mover hasta que les toca.
+    void ProcessQueueEvents()
+    {
+        var ev = timeline.queue_events;
+        if (ev == null) return;                     // backend viejo sin queue_events
+
+        while (colaIdx < ev.Count && ev[colaIdx].t_join <= simClock)
+        {
+            var e = ev[colaIdx++];
+            currentQueue[e.voter] = e;
+            TomarLugarEnFila(e);
+        }
+
+        var yaPasaron = new List<int>();
+        foreach (var (id, e) in currentQueue)
+        {
+            if (simClock >= e.t_leave) { yaPasaron.Add(id); continue; }
+            if (!voters.TryGetValue(id, out var go) || go == null) { yaPasaron.Add(id); continue; }
+            // Mientras camina hacia la fila lo mueve la interpolacion; solo lo
+            // paramos en su lugar cuando ya llego.
+            if (currentMove.ContainsKey(id)) continue;
+
+            if (!anclaDeEspera.TryGetValue(id, out var anchor) || !anchor)
+                continue;                           // sin lugar libre, se queda donde este
+            // Solo la posicion del ancla: su rotacion puede venir tumbada del FBX,
+            // igual que en los SLOT_. Los paramos verticales mirando al mueble.
+            go.transform.position = anchor.position;
+            go.transform.rotation = Quaternion.Euler(0f, 90f + yawOffset, 0f);
+        }
+        foreach (var id in yaPasaron) SoltarLugarEnFila(id);
+    }
+
+    // -------------------------------------------------------------------
+    // Reparto de lugares en la fila.
+    //
+    // El FBX trae las filas repartidas por escritorio, QUEUE_<ESTACION>_<slot>_<pos>,
+    // con QUEUE_LUGARES_POR_SLOT lugares en cada una.
+    //
+    // No usamos el `position` que manda el backend: ese numero es la posicion al
+    // momento de formarse y no se actualiza cuando la fila avanza, asi que dos
+    // personas distintas acaban registradas en el mismo lugar y se encimarian.
+    // En vez de eso repartimos el primer lugar libre y lo soltamos al salir, igual
+    // que hacemos con los escritorios. Como la fila es FIFO, el orden visual sale
+    // casi igual al real. Los adultos mayores se reparten desde el otro extremo
+    // para que su fila se distinga de la general.
+    // -------------------------------------------------------------------
+    const int QUEUE_LUGARES_POR_SLOT = 4;
+
+    readonly Dictionary<string, int[]> lugaresDeFila = new();     // estacion -> ocupante por lugar
+    // El ancla se resuelve una vez al asignar el lugar, no cada frame: en una
+    // casilla saturada hay cientos de personas formadas a la vez.
+    readonly Dictionary<int, Transform> anclaDeEspera = new();    // id -> ancla asignada
+
+    int[] PoolDeFila(string estacion)
+    {
+        if (lugaresDeFila.TryGetValue(estacion, out var pool)) return pool;
+        int slots = capacities.TryGetValue(estacion, out var servicio) ? servicio.Length : 1;
+        pool = new int[Mathf.Max(1, slots) * QUEUE_LUGARES_POR_SLOT];
+        lugaresDeFila[estacion] = pool;
+        return pool;
+    }
+
+    void TomarLugarEnFila(QueueEvent e)
+    {
+        var pool = PoolDeFila(e.station.ToLowerInvariant());
+        bool prioridad = e.queue_type == "priority";
+        for (int i = 0; i < pool.Length; i++)
+        {
+            int idx = prioridad ? pool.Length - 1 - i : i;
+            if (pool[idx] != 0) continue;
+            var anchor = Anchor($"QUEUE_{e.station.ToUpperInvariant()}_" +
+                                $"{idx / QUEUE_LUGARES_POR_SLOT:D2}_{idx % QUEUE_LUGARES_POR_SLOT:D2}");
+            if (!anchor) continue;                  // lugar sin ancla modelada, probamos el siguiente
+            pool[idx] = e.voter;
+            anclaDeEspera[e.voter] = anchor;
+            return;
+        }
+        // Fila mas larga que los lugares modelados: se queda sin lugar y no se
+        // reposiciona, en vez de encimarse sobre alguien.
+    }
+
+    void SoltarLugarEnFila(int voterId)
+    {
+        currentQueue.Remove(voterId);
+        if (!anclaDeEspera.Remove(voterId)) return;
+        foreach (var pool in lugaresDeFila.Values)
+            for (int i = 0; i < pool.Length; i++) if (pool[i] == voterId) pool[i] = 0;
     }
 
     void ProcessStationEvents()
@@ -346,6 +552,7 @@ public class SimulationRunner : MonoBehaviour
 
             if (e.@event == "SERVICE_START")
             {
+                SoltarLugarEnFila(e.voter);
                 int slot = AssignSlot(e.voter, e.station);
                 var anchor = Anchor($"SLOT_{e.station.ToUpperInvariant()}_{slot:D2}");
                 // Solo la posicion del ancla; la rotacion del empty puede venir
@@ -448,8 +655,19 @@ public class SimulationRunner : MonoBehaviour
             if (!a || !b) { terminados.Add(id); continue; }
 
             float u = Mathf.InverseLerp(m.t_start, m.t_end, simClock);
-            go.transform.position = Vector3.Lerp(a.position, b.position, u);
-            var dir = (b.position - a.position); dir.y = 0;
+            Vector3 punto, dir;
+            // Los que llegan recorren el zig-zag de la entrada en vez de cruzarlo
+            // en linea recta.
+            bool esLlegada = m.from.ToLowerInvariant() is "entrada" or "spawn";
+            if (esLlegada && rutaEntrada.Count > 0)
+                PuntoEnRutaEntrada(a.position, b.position, u, out punto, out dir);
+            else
+            {
+                punto = Vector3.Lerp(a.position, b.position, u);
+                dir = b.position - a.position;
+            }
+            go.transform.position = punto;
+            dir.y = 0;
             if (dir.sqrMagnitude > 0.001f)
             {
                 // LookRotation solo en horizontal, mas el offset del modelo.
@@ -468,7 +686,8 @@ public class SimulationRunner : MonoBehaviour
     Transform AnchorFor(string etapa, int voterId)
     {
         etapa = etapa.ToLowerInvariant();
-        if (etapa == "spawn")  return Anchor("SPAWN");
+        // El backend nombra el origen "entrada"; "spawn" se acepta por si acaso.
+        if (etapa == "entrada" || etapa == "spawn") return Anchor("SPAWN");
         if (etapa == "salida") return Anchor("EXIT");
         int slot = voterSlot.TryGetValue(voterId, out var s) ? s : 0;
         return Anchor($"SLOT_{etapa.ToUpperInvariant()}_{slot:D2}");
