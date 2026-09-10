@@ -1,7 +1,7 @@
 import pytest
 
 from casilla import CasillaModel
-from casilla.agents import VoterAgent
+from casilla.agents import CANDIDATOS, VoterAgent
 from casilla.timeline import build_timeline
 
 
@@ -126,3 +126,79 @@ def test_external_events_rename_time_to_t_start():
     assert len(timeline["external_events"]) == 1
     external_event = timeline["external_events"][0]
     assert set(external_event.keys()) == {"kind", "t_start", "duration"}
+
+
+def test_results_tally_only_counts_voters_who_exited():
+    model = CasillaModel(num_voters=5, arrival_rate=0.5, rng=7, rejection_rate=0.0)
+    model.run_to_completion()
+
+    timeline = build_timeline(model)
+    results = timeline["summary"]["results"]
+
+    assert results["total_votes"] == 5
+    assert sum(results["votes_by_candidate"].values()) == 5
+
+
+def test_results_exclude_rejected_voters():
+    # Everyone is turned away at the secretario, so no ballot is ever cast
+    # even though each voter arrived carrying one.
+    model = CasillaModel(num_voters=5, arrival_rate=0.5, rng=7, rejection_rate=1.0)
+    model.run_to_completion()
+
+    timeline = build_timeline(model)
+    results = timeline["summary"]["results"]
+
+    assert timeline["summary"]["voters_arrived"] == 5
+    assert timeline["summary"]["voters_rejected"] == 5
+    assert results["total_votes"] == 0
+    assert set(results["votes_by_candidate"].values()) == {0}
+    assert results["winner"] is None
+    assert results["is_tie"] is False
+    assert results["tied_candidates"] == []
+
+
+def test_results_report_every_candidate_even_at_zero_votes():
+    model = CasillaModel(num_voters=1, arrival_rate=0.5, rng=7, rejection_rate=0.0)
+    model.run_to_completion()
+
+    timeline = build_timeline(model)
+    results = timeline["summary"]["results"]
+
+    assert set(results["votes_by_candidate"]) == set(CANDIDATOS)
+    assert results["total_votes"] == 1
+
+
+def test_results_name_the_candidate_with_the_most_votes():
+    # Named off CANDIDATOS instead of literals so renaming the parties does
+    # not break the test.
+    first, second, third = CANDIDATOS[0], CANDIDATOS[1], CANDIDATOS[2]
+    model = CasillaModel(num_voters=5, arrival_rate=0.5, rng=7, rejection_rate=0.0)
+    model.run_to_completion()
+    # Overwrite the ballots after the fact so the tally is deterministic
+    # regardless of how the RNG handed out votes during the run.
+    arrivals = [e for e in model.event_log if e["event"] == "ARRIVAL"]
+    for entry, candidate in zip(arrivals, [first, first, first, second, third]):
+        entry["voto"] = candidate
+
+    results = build_timeline(model)["summary"]["results"]
+
+    assert results["votes_by_candidate"] == {first: 3, second: 1, third: 1}
+    assert results["winner"] == first
+    assert results["is_tie"] is False
+    assert results["tied_candidates"] == []
+
+
+def test_results_report_a_tie_instead_of_picking_a_winner():
+    first, second, third = CANDIDATOS[0], CANDIDATOS[1], CANDIDATOS[2]
+    model = CasillaModel(num_voters=4, arrival_rate=0.5, rng=7, rejection_rate=0.0)
+    model.run_to_completion()
+    arrivals = [e for e in model.event_log if e["event"] == "ARRIVAL"]
+    for entry, candidate in zip(arrivals, [first, first, second, second]):
+        entry["voto"] = candidate
+
+    results = build_timeline(model)["summary"]["results"]
+
+    assert results["votes_by_candidate"] == {first: 2, second: 2, third: 0}
+    assert results["winner"] is None
+    assert results["is_tie"] is True
+    assert results["tied_candidates"] == sorted([first, second])
