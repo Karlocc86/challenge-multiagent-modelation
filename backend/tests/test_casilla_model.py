@@ -564,6 +564,7 @@ def test_start_transit_delays_the_callback_until_transit_completes():
     assert calls == [move["t_end"]]
 
 
+
 # ---------------------------------------------------------------------------
 # Evento externo forzado
 # ---------------------------------------------------------------------------

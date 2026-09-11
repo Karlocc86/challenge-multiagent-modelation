@@ -18,6 +18,10 @@ from mesa import Model
 from mesa.time import Event, Priority
 
 from .agents import Coordinador, Message, Station, VoterAgent
+from .arrivals import (
+    sample_beta_arrivals,
+    validate_beta_mixture,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,9 @@ class CasillaModel(Model):
         forced_event_duration: float | None = None,
         rng: int | None = None,
     ) -> None:
+        if isinstance(num_voters, bool) or not isinstance(num_voters, int) or num_voters < 0:
+            raise ValueError("num_voters debe ser un entero mayor o igual que 0.")
+        self.arrival_beta = None if arrival_beta is None else validate_beta_mixture(arrival_beta)
         super().__init__(rng=rng)
 
         # Mesa's Model starts a hidden recurring step() event by default;
@@ -109,6 +116,7 @@ class CasillaModel(Model):
         self.forced_event_kind = forced_event_kind
         self.forced_event_time = forced_event_time
         self.forced_event_duration = forced_event_duration
+
 
         self.secretario = Station(
             self,
@@ -315,7 +323,7 @@ class CasillaModel(Model):
         )
         kind = self.random.choice(EXTERNAL_EVENT_KINDS)
         duration = self.random.uniform(3.0, 10.0)
-        # Every draw above happens even when its value is about to be discarded.
+         # Every draw above happens even when its value is about to be discarded.
         # They sit between the arrival draws and every draw the run itself makes,
         # so skipping one would shift the whole rest of the run: forcing the kind
         # has to leave the same seed producing the same people.
