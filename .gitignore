@@ -1,8 +1,10 @@
 # Python
 backend/.venv/
-backend/__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+*.egg-info/
 
 # .NET
 client-csharp/bin/
@@ -16,6 +18,12 @@ unity-client/MultiAgent-simulation/UserSettings/
 unity-client/MultiAgent-simulation/obj/
 unity-client/MultiAgent-simulation/Build/
 unity-client/MultiAgent-simulation/Builds/
+unity-client/MultiAgent-simulation/MemoryCaptures/
+unity-client/MultiAgent-simulation/*.csproj
+unity-client/MultiAgent-simulation/*.sln
+unity-client/MultiAgent-simulation/*.slnx
+unity-client/MultiAgent-simulation/Assets/_Recovery/
+unity-client/MultiAgent-simulation/Assets/_Recovery.meta
 
 # IDE and local settings
 .vs/
