@@ -6,7 +6,12 @@ from mesa.time import Priority
 
 from casilla import CasillaModel
 from casilla.agents import ADULTO_MAYOR_THRESHOLD, CANDIDATOS, Message, Station, VoterAgent
-from casilla.model import TRANSIT_TIMES
+from casilla.model import (
+    ARRIVAL_WINDOW_MINUTES,
+    CLOSING_TIME_MINUTES,
+    JORNADA_MINUTOS,
+    TRANSIT_TIMES,
+)
 
 
 def _arrivals(model: CasillaModel) -> list[tuple[int, float]]:
@@ -139,6 +144,79 @@ def test_event_log_records_each_station_completion_in_order():
         ("casilla", "urna"),
         ("urna", "salida"),
     ]
+
+
+# --- Cierre de la jornada (8:00 PM = minuto 720) --------------------------
+
+
+def test_jornada_minutos_is_twelve_hours_and_closing_alias_matches():
+    assert JORNADA_MINUTOS == 12 * 60
+    assert CLOSING_TIME_MINUTES == JORNADA_MINUTOS
+
+
+def test_no_arrivals_are_admitted_after_the_workday_closes():
+    # 'uniforme' spreads arrivals unbounded, so with enough voters at a fast rate
+    # the schedule would run well past minute 720 and the cutoff must trim the tail.
+    model = CasillaModel(
+        num_voters=1200, arrival_rate=1.0, arrival_profile="uniforme", rng=7
+    )
+    model.run_to_completion()
+
+    arrivals = [e["time"] for e in model.event_log if e["event"] == "ARRIVAL"]
+    assert max(arrivals) <= JORNADA_MINUTOS
+    assert len(arrivals) < 1200  # the cutoff bit: not everyone got in
+
+
+def test_voter_admitted_before_closing_can_finish_after_closing():
+    model = CasillaModel(num_voters=1200, arrival_rate=1.0, rng=7)
+    model.run_to_completion()
+
+    last_arrival = max(e["time"] for e in model.event_log if e["event"] == "ARRIVAL")
+    last_exit = max(e["time"] for e in model.event_log if e["event"] == "EXIT")
+
+    assert last_arrival <= JORNADA_MINUTOS
+    assert last_exit > JORNADA_MINUTOS
+    assert model.time > JORNADA_MINUTOS
+
+
+def test_realista_profile_concentrates_arrivals_in_the_morning():
+    model = CasillaModel(num_voters=600, arrival_profile="realista", rng=7)
+    model.run_to_completion()
+    times = sorted(e["time"] for e in model.event_log if e["event"] == "ARRIVAL")
+
+    assert len(times) == 600
+    assert 0.0 <= times[0]
+    assert times[-1] <= ARRIVAL_WINDOW_MINUTES  # density support ends at 18:00
+    first_third = sum(1 for t in times if t < ARRIVAL_WINDOW_MINUTES / 3)
+    last_third = sum(1 for t in times if t >= 2 * ARRIVAL_WINDOW_MINUTES / 3)
+    assert first_third > 2 * last_third  # clear mid-morning skew
+
+
+def test_uniforme_profile_keeps_the_exponential_gap_behaviour():
+    model = CasillaModel(
+        num_voters=400, arrival_rate=1.0, arrival_profile="uniforme", rng=3
+    )
+    model.run_to_completion()
+    times = sorted(e["time"] for e in model.event_log if e["event"] == "ARRIVAL")
+    gaps = [b - a for a, b in zip(times, times[1:])]
+
+    assert 0.75 < sum(gaps) / len(gaps) < 1.35  # mean gap ~ 1 / arrival_rate
+
+
+def test_invalid_arrival_profile_is_rejected():
+    with pytest.raises(ValueError):
+        CasillaModel(num_voters=0, arrival_profile="loco")
+
+
+def test_run_to_completion_continues_past_closing_until_the_queue_drains():
+    model = CasillaModel(num_voters=1200, arrival_rate=1.0, rng=7)
+    model.run_to_completion()
+
+    assert model._event_list.is_empty()
+    assert model.time > JORNADA_MINUTOS
+    admitted = sum(1 for e in model.event_log if e["event"] == "ARRIVAL")
+    finished = sum(1 for e in model.event_log if e["event"] in ("EXIT", "REJECTED"))
+    assert finished == admitted
 
 
 # --- Voter demographics ----------------------------------------------------
@@ -536,7 +614,11 @@ def test_forced_event_time_can_fall_outside_the_random_window():
     # Unforced the event lands between 25% and 75% of the arrival horizon; a
     # forced minute is not held to that window.
     model = CasillaModel(
-        num_voters=5, arrival_rate=0.5, rng=7, forced_event_time=500.0
+        num_voters=5,
+        arrival_rate=0.5,
+        arrival_profile="uniforme",
+        rng=7,
+        forced_event_time=500.0,
     )
 
     model.run_to_completion()

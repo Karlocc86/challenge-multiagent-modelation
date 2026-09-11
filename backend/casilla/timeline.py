@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .agents import CANDIDATOS
-from .model import CasillaModel
+from .model import JORNADA_MINUTOS, CasillaModel
 
 STATION_NAMES = ["secretario", "mesa", "casilla", "urna"]
 
@@ -30,7 +30,14 @@ def build_timeline(model: CasillaModel) -> dict[str, Any]:
 def _build_summary(model: CasillaModel) -> dict[str, Any]:
     event_types = [entry["event"] for entry in model.event_log]
     return {
+        # Exit of the last voter, not the 8:00 PM close: a run finishes when the
+        # stations and queues are empty, which is later than JORNADA_MINUTOS
+        # whenever anyone admitted before closing is still being served.
         "duration_minutes": model.time,
+        "jornada_minutes": JORNADA_MINUTOS,
+        "reception_closed_at": JORNADA_MINUTOS,
+        "last_arrival_minute": model.last_scheduled_arrival_time,
+        "overtime_minutes": max(0.0, model.time - JORNADA_MINUTOS),
         "voters_arrived": event_types.count("ARRIVAL"),
         "voters_exited": event_types.count("EXIT"),
         "voters_rejected": event_types.count("REJECTED"),
@@ -150,11 +157,23 @@ def _build_station_events(model: CasillaModel) -> list[dict[str, Any]]:
 
 
 def _build_voter_events(model: CasillaModel) -> list[dict[str, Any]]:
-    return [
-        {"voter": entry["voter"], "event": entry["event"], "t": entry["time"]}
+    # `voto` only lives on the ARRIVAL entry; attach it to each EXIT so clients
+    # can chart the vote by candidate over time without a second lookup. ARRIVAL
+    # itself stays trimmed to {voter, event, t} (edad/voto deliberately hidden).
+    ballots = {
+        entry["voter"]: entry["voto"]
         for entry in model.event_log
-        if entry["event"] in ("ARRIVAL", "REJECTED", "EXIT")
-    ]
+        if entry["event"] == "ARRIVAL"
+    }
+    events: list[dict[str, Any]] = []
+    for entry in model.event_log:
+        if entry["event"] not in ("ARRIVAL", "REJECTED", "EXIT"):
+            continue
+        item = {"voter": entry["voter"], "event": entry["event"], "t": entry["time"]}
+        if entry["event"] == "EXIT" and entry["voter"] in ballots:
+            item["candidate"] = ballots[entry["voter"]]
+        events.append(item)
+    return events
 
 
 def _build_external_events(model: CasillaModel) -> list[dict[str, Any]]:

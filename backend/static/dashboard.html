@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Resultados de la simulación — Casilla Especial</title>
+<style>
+  :root {
+    color-scheme: light;
+    --plane:        #f9f9f7;
+    --surface:      #fcfcfb;
+    --ink:          #0b0b0b;
+    --ink-2:        #52514e;
+    --muted:        #898781;
+    --grid:         #e1e0d9;
+    --axis:         #c3c2b7;
+    --border:       rgba(11,11,11,0.10);
+    --c-pan:        #2a78d6;  /* categórico 1 */
+    --c-mc:         #eb6834;  /* categórico 2 */
+    --c-morena:     #1baf7a;  /* categórico 3 */
+    --flow-lleg:    #2a78d6;
+    --flow-voto:    #008300;
+    --flow-rech:    #e34948;
+    --good:         #006300;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--plane); color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1040px; margin: 0 auto; padding: 32px 24px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 40px 0 14px; padding-bottom: 6px; border-bottom: 2px solid var(--axis); }
+  .sub { color: var(--ink-2); margin: 0 0 8px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .grid { display: grid; gap: 14px; }
+  .grid.k4 { grid-template-columns: repeat(4, 1fr); }
+  .grid.k3 { grid-template-columns: repeat(3, 1fr); }
+  .grid.k2 { grid-template-columns: repeat(2, 1fr); }
+  .kpi .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  .kpi .value { font-size: 26px; font-weight: 650; margin-top: 4px; }
+  .kpi .note  { color: var(--ink-2); font-size: 13px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .03em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  dl.params { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+  dl.params dt { color: var(--muted); }
+  dl.params dd { margin: 0; }
+  .verdict { font-size: 22px; font-weight: 700; margin: 12px 0 4px; }
+  .badge {
+    display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .04em;
+    padding: 2px 8px; border-radius: 999px; background: var(--good); color: #fff; vertical-align: 2px;
+  }
+  svg { display: block; width: 100%; height: auto; background: var(--surface); border-radius: 10px; border: 1px solid var(--border); }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 2px 0; font-size: 14px; color: var(--ink-2); }
+  .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: 3px; }
+  .axis text { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .axis line, .axis path { stroke: var(--axis); }
+  .grid-line { stroke: var(--grid); }
+  .flow-line { fill: none; stroke-width: 2.5; }
+  .end-label { font-size: 12px; font-weight: 650; }
+  .warn { color: var(--flow-rech); }
+  .miss { color: var(--muted); font-style: italic; }
+  #tt {
+    position: fixed; pointer-events: none; background: var(--ink); color: #fff; font-size: 12px;
+    padding: 6px 9px; border-radius: 6px; opacity: 0; transition: opacity .1s; white-space: nowrap;
+    font-variant-numeric: tabular-nums; z-index: 10;
+  }
+  @media (max-width: 720px) {
+    .grid.k4, .grid.k3 { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media print {
+    body { background: #fff; }
+    h2 { break-after: avoid; }
+    .card, svg { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<main id="app">
+  <p class="miss">Cargando…</p>
+</main>
+<div id="tt"></div>
+
+<script>
+window.__DATA__ = /*__DATA__*/null;
+
+(function () {
+  const D = window.__DATA__;
+  const app = document.getElementById("app");
+  if (!D) {
+    app.innerHTML = '<h1>Resultados de la simulación</h1>' +
+      '<p class="miss">Abre esta página a través del servidor: ejecuta ' +
+      '<code>python server.py</code> y visita <code>http://127.0.0.1:5000/</code>.</p>';
+    return;
+  }
+
+  const P = D.params, T = D.timeline, S = T.summary, R = S.results;
+  const CAND_COLORS = ["var(--c-pan)", "var(--c-mc)", "var(--c-morena)"];
+  const START_HOUR = 8;
+  const SEED = P.seed == null ? "aleatoria" : P.seed;
+
+  const clock = (min) => {
+    if (min == null) return "—";
+    const total = START_HOUR * 60 + Math.round(min);
+    const h = Math.floor(total / 60) % 24, m = total % 60;
+    return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+  };
+  const pct = (n, d) => d > 0 ? (100 * n / d).toFixed(1) + " %" : "—";
+  const esc = (s) => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const EVENT_LABEL = { corte_de_luz: "Corte de luz", temblor: "Temblor", aguacero: "Aguacero" };
+
+  // ---- derived stats -------------------------------------------------------
+  const ext = (T.external_events || [])[0] || null;
+  const arrived = S.voters_arrived, voted = S.voters_exited, rejected = S.voters_rejected;
+  const approved = arrived - rejected;                       // pasaron el secretario
+  const prioritariosSet = new Set(
+    (T.queue_events || []).filter(q => q.queue_type === "priority").map(q => q.voter)
+  );
+
+  const candNames = Object.keys(R.votes_by_candidate);
+  const lambda = P.arrival_rate;
+
+  // Casilla real que este proyecto modela — PREP 2024, Sección 3068 / Casilla
+  // Contigua 5 (Esc. Prim. Urb. Fed. Calmecac, Puerta de Hierro / Paseo Andares,
+  // Zapopan, Jal.). Fuente: acta PREP de la casilla. No sale del timeline: es el
+  // dato de referencia contra el que se calibró CANDIDATO_WEIGHTS.
+  const REAL = {
+    sede: "Esc. Prim. Urb. Fed. Calmecac — Puerta de Hierro / Paseo Andares, Zapopan, Jal.",
+    seccion: 3068, casilla: "Contigua 5",
+    listaNominal: 701, participacion: 0.6690, totalVotos: 469,
+    votes: { "PAN": 354, "Movimiento Ciudadano": 51, "Morena": 50 },
+  };
+
+  // ---- render -------------------------------------------------------------
+  app.innerHTML = `
+    <h1>Resultados de la simulación — Casilla Especial</h1>
+    <p class="sub">
+      ${D.live
+        ? "Resultados de tu última corrida (la que se ejecutó en Unity / <code>POST /simulate</code>)"
+        : "Escenario de ejemplo — corre la simulación en Unity y recarga esta página para ver la tuya"}
+      · semilla ${SEED} · ${arrived.toLocaleString("es-MX")} votantes admitidos ·
+      capacidades S/M/C/U ${["secretario", "mesa", "casilla", "urna"].map(n => S.stations[n].capacity).join("/")} ·
+      jornada 08:00–20:00 (${S.jornada_minutes} min)${ext ? ` · ${EVENT_LABEL[ext.kind] || ext.kind} a las ${clock(ext.t_start)}` : ""}
+    </p>
+    <p class="sub">
+      La casilla real (Sección ${REAL.seccion}, Contigua ${REAL.casilla.replace("Contigua ", "")}) tenía
+      <strong>${REAL.listaNominal.toLocaleString("es-MX")}</strong> electores en lista nominal —
+      de esos, llegaron y votaron <strong>${REAL.totalVotos.toLocaleString("es-MX")}</strong>
+      (participación real ${(REAL.participacion * 100).toFixed(1)} %). Ese es el 469 que usa el
+      escenario por defecto como <code>num_voters</code> — no los 701; este modelo no simula a
+      quien nunca se presenta, solo programa directamente a los que sí llegan.
+    </p>
+
+    <h2>1 · Parámetros y distribuciones del modelo</h2>
+    <div class="grid k2">
+      <div class="card">
+        <dl class="params">
+          <dt>Votantes que llegan</dt><dd>${P.num_voters.toLocaleString("es-MX")}
+              <span class="miss">(no es la lista nominal — es quienes se presentan)</span></dd>
+          <dt>Semilla</dt><dd>${SEED}</dd>
+          <dt>Llegadas</dt><dd>${(P.arrival_profile || "realista") === "uniforme"
+              ? `Perfil <strong>uniforme</strong>: proceso de Poisson, tasa λ = ${lambda.toFixed(3)}/min
+                 ⇒ 1 cada ${(1 / lambda).toFixed(1)} min en promedio (intervalos exponenciales)`
+              : `Perfil <strong>realista</strong>: la afluencia varía con la hora —
+                 f(t) = 0.82·Beta((t−8)/10; 2, 4) + 0.18·Beta((t−8)/10; 6, 2), con t en horas.
+                 Pico a media mañana (~11:00) y un repunte menor por la tarde (~16:00); ventana 08:00–18:00`}</dd>
+          <dt>Cierre de entrada</dt><dd>20:00 — las llegadas posteriores se ignoran; los votantes dentro terminan</dd>
+          <dt>Rechazo INE</dt><dd>Bernoulli, p = ${(P.rejection_rate * 100).toFixed(1)} % en el secretario</dd>
+          <dt>Fila preferente</dt><dd>edad ~ uniforme discreta en [18, 90] ⇒ P(adulto mayor ≥ 60) ≈ 42 %</dd>
+          <dt>Candidatos</dt><dd>${candNames.length}, con probabilidad calibrada al resultado
+              real de esta casilla (ver comparación al final)</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <table>
+          <thead><tr><th>Estación</th><th class="num">Capacidad</th><th class="num">Servicio U(min, máx) — min</th></tr></thead>
+          <tbody>
+            ${["secretario", "mesa", "casilla", "urna"].map(n => {
+              const st = S.stations[n];
+              return `<tr><td>${n}</td><td class="num">${st.capacity}</td>
+                      <td class="num">${st.service_time_range[0]} – ${st.service_time_range[1]}</td></tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        <p class="sub" style="margin-top:12px">
+          <strong>Evento externo</strong> (1 por jornada; inicio U(25–75 % del horizonte), duración U(3–10 min)):
+          ${ext
+            ? `${EVENT_LABEL[ext.kind] || ext.kind} a las ${clock(ext.t_start)},
+               dura ${ext.duration.toFixed(1)} min — pausa todas las estaciones`
+            : "ninguno en esta corrida"}
+        </p>
+      </div>
+    </div>
+
+    <h2>2 · Flujo del día</h2>
+
+    <h2 style="font-size:16px;border:0;margin:4px 0 8px">Llegadas por hora</h2>
+    <div id="arrHora"></div>
+
+    <h2 style="font-size:16px;border:0;margin:22px 0 8px">Acumulado del día</h2>
+    <div id="flow"></div>
+    <div class="legend">
+      <span><i style="background:var(--flow-lleg)"></i>Llegadas acumuladas</span>
+      <span><i style="background:var(--flow-voto)"></i>Votos emitidos</span>
+      <span><i style="background:var(--flow-rech)"></i>Rechazos</span>
+      <span><i style="background:var(--axis)"></i>Cierre de entrada (20:00)</span>
+      ${ext ? `<span><i style="background:rgba(137,135,129,.35)"></i>${EVENT_LABEL[ext.kind] || ext.kind}</span>` : ""}
+    </div>
+
+    <h2>3 · Resultado de la votación</h2>
+    <div id="bars"></div>
+
+    <h2 style="font-size:16px;border:0;margin:22px 0 8px">Votos emitidos por hora y candidato</h2>
+    <div id="hourly"></div>
+    <div class="legend">
+      ${candNames.map((n, i) =>
+        `<span><i style="background:${CAND_COLORS[i]}"></i>${esc(n)}</span>`).join("")}
+    </div>
+
+    <p class="verdict" style="margin-top:22px">
+      ${R.total_votes === 0
+        ? "Sin votos emitidos"
+        : R.is_tie
+          ? `Empate: ${R.tied_candidates.join(" · ")}`
+          : `Ganador: ${esc(R.winner)} <span class="badge">GANADOR</span>`}
+    </p>
+
+    <div class="grid k4" style="margin-top:18px">
+      ${kpi("Llegaron", arrived.toLocaleString("es-MX"),
+            `votantes admitidos (hasta 20:00) · la casilla real: ${REAL.totalVotos} de ${REAL.listaNominal} en lista (${(REAL.participacion * 100).toFixed(1)} %)`)}
+      ${kpi("Votaron", voted.toLocaleString("es-MX"), pct(voted, arrived) + " de los que llegaron")}
+      ${kpi("Rechazados", rejected.toLocaleString("es-MX"), pct(rejected, arrived) + " en el secretario")}
+      ${kpi("Fila preferente", prioritariosSet.size.toLocaleString("es-MX"), pct(prioritariosSet.size, arrived) + " de los que llegaron")}
+      ${kpi("Duración real", clock(S.duration_minutes), Math.round(S.duration_minutes) + " min desde la apertura")}
+      ${kpi("Tiempo extra", (S.overtime_minutes || 0).toFixed(1) + " min", "después de las 20:00")}
+      ${kpi("Última llegada", clock(S.last_arrival_minute), "última persona admitida")}
+      ${kpi("Total de votos", R.total_votes.toLocaleString("es-MX"), "depositados en la urna")}
+    </div>
+
+    <h2 style="font-size:16px;border:0;margin-top:26px">Embudo del votante</h2>
+    <div id="funnel"></div>
+
+    <h2>4 · Comparación con el resultado real (PREP 2024)</h2>
+    <p class="sub">
+      Sección ${REAL.seccion}, Casilla ${REAL.casilla} — ${esc(REAL.sede)}.
+      Lista nominal ${REAL.listaNominal.toLocaleString("es-MX")},
+      participación real ${(REAL.participacion * 100).toFixed(1)} %,
+      ${REAL.totalVotos} votos totales.
+    </p>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Candidato</th><th class="num">Simulado</th><th class="num">Simulado %</th>
+              <th class="num">Real (PREP)</th><th class="num">Real %</th></tr>
+        </thead>
+        <tbody>
+          ${candNames.map(n => {
+            const simV = R.votes_by_candidate[n], realV = REAL.votes[n] ?? 0;
+            const realTotal = Object.values(REAL.votes).reduce((a, b) => a + b, 0);
+            return `<tr><td>${esc(n)}</td>
+              <td class="num">${simV.toLocaleString("es-MX")}</td>
+              <td class="num">${pct(simV, R.total_votes)}</td>
+              <td class="num">${realV.toLocaleString("es-MX")}</td>
+              <td class="num">${pct(realV, realTotal)}</td></tr>`;
+          }).join("")}
+          <tr><td><strong>Participación</strong></td>
+              <td class="num">${voted.toLocaleString("es-MX")}</td>
+              <td class="num">${pct(voted, arrived)}</td>
+              <td class="num">${REAL.totalVotos.toLocaleString("es-MX")}</td>
+              <td class="num">${(REAL.participacion * 100).toFixed(1)} %</td></tr>
+        </tbody>
+      </table>
+      <p class="note" style="margin-top:8px">
+        <code>CANDIDATO_WEIGHTS</code> se calibró con los votos reales de esta casilla;
+        candidaturas no registradas y votos nulos (~2 % del total real) no tienen
+        categoría en este modelo. La fila de participación compara bases distintas:
+        "Simulado %" es sobre quienes llegaron (el modelo no simula abstención — se
+        programan directamente los ${arrived.toLocaleString("es-MX")} que se presentan);
+        "Real %" es sobre la lista nominal completa (${REAL.listaNominal}). Lo comparable
+        es el conteo: ${voted.toLocaleString("es-MX")} votos simulados vs
+        ${REAL.totalVotos} reales.
+      </p>
+    </div>
+  `;
+
+  function kpi(label, value, note) {
+    return `<div class="card kpi"><div class="label">${label}</div>
+            <div class="value">${value}</div><div class="note">${note}</div></div>`;
+  }
+
+  // ---- flow chart (cumulative step lines) --------------------------------
+  drawArrHora(document.getElementById("arrHora"));
+  drawFlow(document.getElementById("flow"));
+  drawBars(document.getElementById("bars"));
+  drawHourly(document.getElementById("hourly"));
+  drawFunnel(document.getElementById("funnel"));
+
+  function cumulative(kind) {
+    const pts = [{ t: 0, n: 0 }];
+    let n = 0;
+    for (const e of (T.voter_events || [])) {
+      if (e.event !== kind) continue;
+      pts.push({ t: e.t, n });          // step: hold previous value up to t
+      n += 1;
+      pts.push({ t: e.t, n });
+    }
+    pts.push({ t: S.duration_minutes, n });
+    return pts;
+  }
+
+  function drawFlow(host) {
+    const W = 960, H = 400, m = { t: 16, r: 124, b: 40, l: 56 };
+    const tMax = Math.max(S.duration_minutes, S.jornada_minutes);
+    const series = [
+      { key: "ARRIVAL", color: "var(--flow-lleg)", label: "Llegadas", dash: "" },
+      { key: "EXIT", color: "var(--flow-voto)", label: "Votos", dash: "" },
+      { key: "REJECTED", color: "var(--flow-rech)", label: "Rechazos", dash: "5 4" },
+    ].map(s => ({ ...s, pts: cumulative(s.key) }));
+    const yMax = Math.max(10, ...series.map(s => s.pts[s.pts.length - 1].n));
+    const nice = Math.ceil(yMax / 5) * 5;
+
+    const x = t => m.l + (t / tMax) * (W - m.l - m.r);
+    const y = v => H - m.b - (v / nice) * (H - m.t - m.b);
+
+    const xticks = [];
+    for (let mn = 0; mn <= tMax + 1; mn += 60) xticks.push(mn);
+    const yticks = [];
+    for (let v = 0; v <= nice; v += Math.max(1, Math.round(nice / 5))) yticks.push(v);
+
+    const path = pts => "M" + pts.map(p => `${x(p.t).toFixed(1)},${y(p.n).toFixed(1)}`).join(" L");
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Llegadas, votos y rechazos acumulados a lo largo del día">`;
+    // gridlines + y axis
+    svg += `<g class="axis">`;
+    for (const v of yticks) {
+      svg += `<line class="grid-line" x1="${m.l}" y1="${y(v)}" x2="${W - m.r}" y2="${y(v)}"/>`;
+      svg += `<text x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+    }
+    for (const t of xticks) {
+      svg += `<line class="grid-line" x1="${x(t)}" y1="${m.t}" x2="${x(t)}" y2="${H - m.b}"/>`;
+      svg += `<text x="${x(t)}" y="${H - m.b + 18}" text-anchor="middle">${clock(t)}</text>`;
+    }
+    svg += `</g>`;
+    // external event band
+    if (ext) {
+      const x0 = x(ext.t_start), x1 = x(Math.min(ext.t_start + ext.duration, tMax));
+      svg += `<rect x="${x0}" y="${m.t}" width="${Math.max(3, x1 - x0)}" height="${H - m.t - m.b}"
+              fill="rgba(137,135,129,.34)"/>`;
+      svg += `<text x="${(x0 + x1) / 2}" y="${m.t + 14}" text-anchor="middle"
+              style="fill:var(--ink-2);font-size:12px">${EVENT_LABEL[ext.kind] || ext.kind}</text>`;
+    }
+    // 20:00 closing line
+    if (S.jornada_minutes <= tMax) {
+      svg += `<line x1="${x(S.jornada_minutes)}" y1="${m.t}" x2="${x(S.jornada_minutes)}" y2="${H - m.b}"
+              stroke="var(--axis)" stroke-width="2" stroke-dasharray="2 4"/>`;
+    }
+    // series lines
+    for (const s of series) {
+      svg += `<path class="flow-line" d="${path(s.pts)}" stroke="${s.color}"
+              ${s.dash ? `stroke-dasharray="${s.dash}"` : ""}/>`;
+    }
+    // end labels, nudged apart so close-valued series don't overlap
+    const labels = series
+      .map(s => ({ s, y: y(s.pts[s.pts.length - 1].n), n: s.pts[s.pts.length - 1].n }))
+      .sort((a, b) => a.y - b.y);
+    for (let i = 1; i < labels.length; i++)
+      if (labels[i].y - labels[i - 1].y < 15) labels[i].y = labels[i - 1].y + 15;
+    for (const L of labels) {
+      svg += `<text class="end-label" x="${W - m.r + 6}" y="${L.y + 4}"
+              fill="${L.s.color}">${L.s.label} ${L.n}</text>`;
+    }
+    // crosshair
+    svg += `<line id="cx" y1="${m.t}" y2="${H - m.b}" stroke="var(--ink-2)" stroke-width="1" opacity="0"/>`;
+    svg += `<rect id="hit" x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"/>`;
+    svg += `</svg>`;
+    host.innerHTML = svg;
+
+    const el = host.querySelector("svg"), cx = host.querySelector("#cx"),
+          hit = host.querySelector("#hit"), tt = document.getElementById("tt");
+    hit.addEventListener("pointermove", (ev) => {
+      const box = el.getBoundingClientRect();
+      const px = (ev.clientX - box.left) / box.width * W;
+      const t = Math.max(0, Math.min(tMax, (px - m.l) / (W - m.l - m.r) * tMax));
+      cx.setAttribute("x1", x(t)); cx.setAttribute("x2", x(t)); cx.setAttribute("opacity", "1");
+      const at = k => { const p = cumulative(k); let v = 0; for (const q of p) if (q.t <= t) v = q.n; return v; };
+      tt.style.opacity = "1";
+      tt.style.left = (ev.clientX + 14) + "px";
+      tt.style.top = (ev.clientY - 10) + "px";
+      tt.innerHTML = `${clock(t)} &nbsp; Llegadas ${at("ARRIVAL")} · Votos ${at("EXIT")} · Rechazos ${at("REJECTED")}`;
+    });
+    hit.addEventListener("pointerleave", () => { cx.setAttribute("opacity", "0"); tt.style.opacity = "0"; });
+  }
+
+  // ---- arrivals per hour (single-series bars with value labels) -------
+  function drawArrHora(host) {
+    const hours = Math.floor(S.duration_minutes / 60) + 1;
+    const counts = new Array(hours).fill(0);
+    for (const e of (T.voter_events || [])) {
+      if (e.event !== "ARRIVAL") continue;
+      counts[Math.min(hours - 1, Math.floor(e.t / 60))]++;
+    }
+    const yMax = Math.max(1, ...counts);
+    const nice = Math.ceil(yMax / 4) * 4;
+
+    const W = 960, H = 260, m = { t: 24, r: 14, b: 34, l: 40 };
+    const plotH = H - m.t - m.b, band = (W - m.l - m.r) / hours;
+    const bw = Math.min(46, band - 10);
+    const y = v => m.t + plotH - (v / nice) * plotH;
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Llegadas por hora">`;
+    svg += `<g class="axis">`;
+    for (let v = 0; v <= nice; v += Math.max(1, nice / 4)) {
+      svg += `<line class="grid-line" x1="${m.l}" y1="${y(v)}" x2="${W - m.r}" y2="${y(v)}"/>`;
+      svg += `<text x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+    }
+    svg += `</g>`;
+    counts.forEach((v, h) => {
+      const cx = m.l + h * band + band / 2, bh = (v / nice) * plotH;
+      svg += `<rect x="${(cx - bw / 2).toFixed(1)}" y="${y(v).toFixed(1)}" width="${bw.toFixed(1)}"
+              height="${bh.toFixed(1)}" rx="3" fill="var(--flow-lleg)"
+              data-h="${clock(h * 60)}" data-v="${v}"/>`;
+      if (v > 0) svg += `<text x="${cx}" y="${y(v) - 6}" text-anchor="middle"
+              style="font-size:12px;font-weight:650;fill:var(--ink);font-variant-numeric:tabular-nums">${v}</text>`;
+      svg += `<text class="axis" x="${cx}" y="${H - m.b + 18}" text-anchor="middle"
+              style="fill:var(--muted)">${clock(h * 60)}</text>`;
+    });
+    svg += `</svg>`;
+    host.innerHTML = svg;
+
+    const tt = document.getElementById("tt");
+    host.querySelectorAll("rect[data-v]").forEach(r => {
+      r.addEventListener("pointermove", ev => {
+        tt.style.opacity = "1";
+        tt.style.left = (ev.clientX + 14) + "px";
+        tt.style.top = (ev.clientY - 10) + "px";
+        tt.textContent = `${r.dataset.h} · ${r.dataset.v} llegadas`;
+      });
+      r.addEventListener("pointerleave", () => { tt.style.opacity = "0"; });
+    });
+  }
+
+  // ---- vote bars --------------------------------------------------------
+  function drawBars(host) {
+    const rows = candNames.map((name, i) => ({
+      name, votes: R.votes_by_candidate[name], color: CAND_COLORS[i % CAND_COLORS.length]
+    })).sort((a, b) => b.votes - a.votes);
+    const maxV = Math.max(1, ...rows.map(r => r.votes));
+    const W = 960, rowH = 46, m = { l: 190, r: 160, t: 10 };
+    const H = m.t + rows.length * rowH + 6;
+    const bw = W - m.l - m.r;
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Votos por candidato">`;
+    rows.forEach((r, i) => {
+      const yTop = m.t + i * rowH, bh = 30, w = Math.max(2, (r.votes / maxV) * bw);
+      const isWin = !R.is_tie && r.name === R.winner && R.total_votes > 0;
+      svg += `<text x="${m.l - 12}" y="${yTop + bh / 2 + 5}" text-anchor="end"
+              style="font-size:15px;font-weight:${isWin ? 700 : 500};fill:var(--ink)">${esc(r.name)}</text>`;
+      svg += `<rect x="${m.l}" y="${yTop}" width="${w}" height="${bh}" rx="4" fill="${r.color}"/>`;
+      svg += `<text x="${m.l + w + 8}" y="${yTop + bh / 2 + 5}"
+              style="font-size:15px;font-weight:${isWin ? 700 : 600};font-variant-numeric:tabular-nums;
+              fill:${isWin ? "var(--good)" : "var(--ink)"}">
+              ${r.votes.toLocaleString("es-MX")} · ${pct(r.votes, R.total_votes)}${isWin ? " ▲" : ""}</text>`;
+    });
+    svg += `</svg>`;
+    host.innerHTML = svg;
+  }
+
+  // ---- votes per hour, grouped by candidate ---------------------------
+  function drawHourly(host) {
+    const hours = Math.floor(S.duration_minutes / 60) + 1;
+    const counts = Array.from({ length: hours }, () => candNames.map(() => 0));
+    for (const e of (T.voter_events || [])) {
+      if (e.event !== "EXIT" || e.candidate == null) continue;
+      const h = Math.min(hours - 1, Math.floor(e.t / 60));
+      const ci = candNames.indexOf(e.candidate);
+      if (ci >= 0) counts[h][ci]++;
+    }
+    const yMax = Math.max(1, ...counts.flat());
+    const nice = Math.ceil(yMax / 4) * 4;
+
+    const W = 960, H = 300, m = { t: 12, r: 14, b: 34, l: 44 };
+    const plotW = W - m.l - m.r, plotH = H - m.t - m.b;
+    const band = plotW / hours;                 // one hour cluster
+    const gap = 6, bw = Math.max(3, (band - gap * 2) / candNames.length);
+    const y = v => m.t + plotH - (v / nice) * plotH;
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Votos por hora, agrupados por candidato">`;
+    svg += `<g class="axis">`;
+    for (let v = 0; v <= nice; v += Math.max(1, nice / 4)) {
+      svg += `<line class="grid-line" x1="${m.l}" y1="${y(v)}" x2="${W - m.r}" y2="${y(v)}"/>`;
+      svg += `<text x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+    }
+    svg += `</g>`;
+    counts.forEach((row, h) => {
+      const x0 = m.l + h * band + gap;
+      svg += `<text class="axis" x="${m.l + h * band + band / 2}" y="${H - m.b + 18}"
+              text-anchor="middle" style="fill:var(--muted)">${clock(h * 60)}</text>`;
+      row.forEach((v, ci) => {
+        const bx = x0 + ci * bw, bh = (v / nice) * plotH;
+        svg += `<rect x="${bx.toFixed(1)}" y="${y(v).toFixed(1)}" width="${(bw - 1).toFixed(1)}"
+                height="${bh.toFixed(1)}" fill="${CAND_COLORS[ci]}"
+                data-h="${clock(h * 60)}" data-c="${esc(candNames[ci])}" data-v="${v}"/>`;
+      });
+    });
+    svg += `</svg>`;
+    host.innerHTML = svg;
+
+    const tt = document.getElementById("tt");
+    host.querySelectorAll("rect[data-v]").forEach(r => {
+      r.addEventListener("pointermove", ev => {
+        tt.style.opacity = "1";
+        tt.style.left = (ev.clientX + 14) + "px";
+        tt.style.top = (ev.clientY - 10) + "px";
+        tt.textContent = `${r.dataset.h} · ${r.dataset.c}: ${r.dataset.v} votos`;
+      });
+      r.addEventListener("pointerleave", () => { tt.style.opacity = "0"; });
+    });
+  }
+
+  // ---- funnel ----------------------------------------------------------
+  function drawFunnel(host) {
+    const stages = [
+      { label: "Llegaron", n: arrived },
+      { label: "Aprobados en el secretario", n: approved },
+      { label: "Votaron", n: voted },
+    ];
+    const W = 960, rowH = 46, m = { l: 230, r: 160, t: 8 };
+    const H = m.t + stages.length * rowH + 4, bw = W - m.l - m.r;
+    const base = Math.max(1, arrived);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Embudo del votante">`;
+    stages.forEach((s, i) => {
+      const yTop = m.t + i * rowH, bh = 30, w = Math.max(2, (s.n / base) * bw);
+      svg += `<text x="${m.l - 12}" y="${yTop + bh / 2 + 5}" text-anchor="end"
+              style="font-size:14px;fill:var(--ink-2)">${s.label}</text>`;
+      svg += `<rect x="${m.l}" y="${yTop}" width="${w}" height="${bh}" rx="4" fill="var(--c-pan)" opacity="${1 - i * 0.22}"/>`;
+      svg += `<text x="${m.l + w + 8}" y="${yTop + bh / 2 + 5}"
+              style="font-size:14px;font-weight:650;fill:var(--ink);font-variant-numeric:tabular-nums">
+              ${s.n.toLocaleString("es-MX")} · ${pct(s.n, base)}</text>`;
+    });
+    svg += `</svg>`;
+    host.innerHTML = svg +
+      `<p class="sub" style="margin-top:8px">${rejected.toLocaleString("es-MX")} rechazados
+       (${pct(rejected, arrived)}) salen tras el secretario;
+       ${(approved - voted).toLocaleString("es-MX")} aprobados seguían en fila o en tránsito al cerrar la corrida.</p>`;
+  }
+})();
+</script>
+</body>
+</html>

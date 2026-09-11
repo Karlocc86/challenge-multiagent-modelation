@@ -29,8 +29,3 @@ unity-client/MultiAgent-simulation/Builds/
 .DS_Store
 Thumbs.db
 
-# Local context notes (not for the repo)
-CONTEXT.md
-IMPLEMENTATION.md
-EXPLICACION.md
-INTEROPERABILIDAD.md

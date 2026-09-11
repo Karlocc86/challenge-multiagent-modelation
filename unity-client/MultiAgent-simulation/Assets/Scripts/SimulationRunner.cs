@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.Networking;
 using Newtonsoft.Json;
 
@@ -16,24 +17,46 @@ public class SimulationRunner : MonoBehaviour
 {
     [Header("Servidor Flask")]
     public string serverUrl = "http://127.0.0.1:5000/simulate";
-    public int numVoters = 50;
+    // 469 = lista nominal 701 x participacion 66.9%, la casilla real que modela
+    // este proyecto (PREP 2024, Seccion 3068 / Contigua 5, Puerta de Hierro /
+    // Paseo Andares, Zapopan). Ver CANDIDATO_WEIGHTS en agents.py.
+    public int numVoters = 469;
+
+    // Realista = las llegadas varian con la hora (pico a media manana ~11:00 y un
+    // repunte menor por la tarde, ventana 08:00-18:00). Uniforme = ritmo constante
+    // (proceso de Poisson) usando 'Promedio Llegadas Por Minuto'.
+    public enum PerfilLlegadas { Realista, Uniforme }
+
+    [Tooltip("Realista: la afluencia cambia con la hora (pico a media manana). " +
+             "Uniforme: ritmo constante segun 'Promedio Llegadas Por Minuto'.")]
+    public PerfilLlegadas perfilLlegadas = PerfilLlegadas.Realista;
+
     // double, no float: Newtonsoft manda ~7 digitos para un float, y Python leeria
     // 0.3333333 en vez de 1/3, cambiando la corrida con la misma semilla.
-    [Tooltip("PROMEDIO de llegadas por minuto simulado. Los huecos entre llegada y " +
-             "llegada siguen siendo aleatorios alrededor de este promedio. Debe ser " +
-             "mayor que 0. 0.333 = una llegada cada 3 minutos en promedio.")]
-    public double promedioLlegadasPorMinuto = 1.0 / 3.0;
+    [Tooltip("Solo en perfil Uniforme. PROMEDIO de llegadas por minuto simulado; los " +
+             "huecos entre llegadas siguen siendo aleatorios. 0.333 = una cada 3 min.")]
+    // 0.78 = calibrado para que, con numVoters=469 (la casilla real), todos entren
+    // antes de las 20:00 con margen. Solo aplica si perfilLlegadas = Uniforme.
+    public double promedioLlegadasPorMinuto = 0.78;
+    [Tooltip("Semilla del generador aleatorio. Con la misma semilla + mismos parametros " +
+             "la corrida es identica. Se ignora si 'Semilla Aleatoria' esta activado.")]
     public int seed = 7;
-    public int secretarioCapacity = 6;
-    public int mesaCapacity = 3;
-    public int casillaCapacity = 8;
-    public int urnaCapacity = 2;
+    [Tooltip("Si esta activado, cada Play usa una semilla nueva al azar (resultados distintos " +
+             "cada vez). La semilla usada se imprime en la consola y aparece en el dashboard.")]
+    public bool semillaAleatoria = false;
+    // Calibradas para que, con numVoters=469 y perfil Realista, la jornada cierre
+    // cerca de la hora real (~17:48-19:46) con ~464-469 votos, como en la casilla real.
+    public int secretarioCapacity = 2;
+    public int mesaCapacity = 1;
+    public int casillaCapacity = 3;
+    public int urnaCapacity = 1;
 
     [Header("Prefabs y reproduccion")]
     public GameObject prefabHombre;
     public GameObject prefabMujer;
-    [Tooltip("Velocidad de reproduccion: 60 = 1 min simulado por segundo real.")]
-    public float speed = 60f;
+    [Tooltip("Velocidad inicial de reproduccion: segundos simulados por segundo real. " +
+             "x1 = tiempo real. Se puede cambiar en vivo con los botones del panel o las teclas 1-5.")]
+    [SerializeField] float multiplicadorInicial = 1f;
     [Tooltip("Grados extra de giro en Y si los modelos miran al lado equivocado. Prueba 90, -90 o 180.")]
     public float yawOffset = 90f;
 
@@ -52,7 +75,7 @@ public class SimulationRunner : MonoBehaviour
              "mayor que la jornada, el evento cae con la casilla ya vacia.")]
     public double minutoDelEvento = 0.0;
     [Tooltip("Cuanto dura, en minutos simulados. 0 = lo decide la semilla (entre 3 " +
-             "y 10). Con speed=60, 20 aqui son 20 segundos reales.")]
+             "y 10). A x64, 20 aqui son ~19 segundos reales.")]
     public double duracionDelEvento = 0.0;
 
     [Tooltip("Particle System de lluvia. Colocalo sobre el patio/entrada, con 'Play On Awake' desactivado.")]
@@ -72,6 +95,30 @@ public class SimulationRunner : MonoBehaviour
     int llegados, atendidos, rechazados;
     bool jornadaTerminada;
 
+    // Reproduccion: multiplicador = segundos simulados por segundo real. x1 = tiempo
+    // real (un minuto simulado tarda 60 s reales). Se ajusta en vivo desde el panel
+    // o con las teclas 1-5; `pausado` congela el reloj sin perder el estado.
+    static readonly float[] MULTIPLICADORES = { 1f, 2f, 4f, 16f, 64f };
+    static readonly Key[] TECLAS_VELOCIDAD =
+        { Key.Digit1, Key.Digit2, Key.Digit3, Key.Digit4, Key.Digit5 };
+    float multiplicadorVelocidad = 1f;
+    bool pausado;
+    bool confirmandoFin;   // el boton "Terminar jornada" espera un segundo clic
+
+    // Respaldo si el backend no manda summary.jornada_minutes (8:00 AM -> 8:00 PM).
+    const float JORNADA_MINUTOS_DEFAULT = 720f;
+
+    // Minuto simulado en que se cierra la entrada. El reloj y el procesamiento
+    // siguen despues de esto: la jornada solo termina cuando sale la ultima
+    // persona (simClock >= duration_minutes).
+    float JornadaMinutos =>
+        timeline != null && timeline.summary != null && timeline.summary.jornada_minutes > 0f
+            ? timeline.summary.jornada_minutes
+            : JORNADA_MINUTOS_DEFAULT;
+
+    // Entrada cerrada (ya son las 20:00) pero todavia queda gente adentro.
+    bool RecepcionCerrada => !jornadaTerminada && simClock >= JornadaMinutos;
+
     // -------------------------------------------------------------------
     // Contrato JSON del backend
     // -------------------------------------------------------------------
@@ -88,7 +135,13 @@ public class SimulationRunner : MonoBehaviour
     [System.Serializable]
     class Summary
     {
+        // Salida de la ultima persona, NO las 8:00 PM: si alguien admitido antes
+        // del cierre sigue en fila, la corrida termina despues del minuto 720.
         public float duration_minutes;
+        // Largo de la jornada en minutos simulados (8:00 AM -> 8:00 PM = 720).
+        // A esa hora se cierra la entrada; el procesamiento sigue. 0 en un
+        // backend viejo que no lo mande -> se usa el respaldo de 720.
+        public float jornada_minutes;
         public int voters_arrived;
         public int voters_exited;
         public int voters_rejected;
@@ -135,6 +188,9 @@ public class SimulationRunner : MonoBehaviour
     readonly Dictionary<string, int> nextSlot = new();      // reparto round-robin de slots
     readonly Dictionary<int, int> voterSlot = new();        // id -> slot asignado
     readonly Dictionary<int, QueueEvent> currentQueue = new(); // id -> fila en la que espera
+    readonly Dictionary<int, float> despawnAt = new();      // id -> minuto sim en que se destruye (ya saliendo)
+    readonly Dictionary<int, Vector3> salidaDesde = new();  // id -> pos inicial de una salida sintetica (rechazo)
+    const float SALIDA_RECHAZO_MIN = 0.4f;                  // duracion (min sim) de la caminata de salida de un rechazado
     // Zig-zag de la entrada: QUEUE_GENERAL_000..045, en orden. Las distancias
     // acumuladas se calculan una vez porque las anclas no se mueven.
     readonly List<Vector3> rutaEntrada = new();
@@ -145,6 +201,18 @@ public class SimulationRunner : MonoBehaviour
 
     void Start()
     {
+        multiplicadorVelocidad = multiplicadorInicial > 0f ? multiplicadorInicial : 1f;
+
+        if (semillaAleatoria)
+        {
+            // Derivada del reloj (cambia cada ~100 ns), NO de UnityEngine.Random:
+            // con "Reload Domain" desactivado en el Editor, Random no se reinicializa
+            // entre Plays y devolveria la misma "semilla" hasta cerrar Unity.
+            seed = (int)(System.DateTime.UtcNow.Ticks & 0x7FFFFFFF);
+            if (seed == 0) seed = 1;
+            Debug.Log($"Semilla aleatoria de esta corrida: {seed}");
+        }
+
         capacities["secretario"] = new int[secretarioCapacity];
         capacities["mesa"]       = new int[mesaCapacity];
         capacities["casilla"]    = new int[casillaCapacity];
@@ -174,13 +242,20 @@ public class SimulationRunner : MonoBehaviour
         ConstruirRutaEntrada();
     }
 
-    // El zig-zag esta modelado como QUEUE_GENERAL_000, _001, ... en el orden en
-    // que se recorre. Lo guardamos como una polilinea con sus distancias
-    // acumuladas para poder interpolar a lo largo de ella a velocidad pareja.
+    // Ruta de llegada: pasillo exterior PATH_ACCESO_000.. (calle -> puerta) seguido
+    // del zig-zag QUEUE_GENERAL_000.., en el orden en que se recorren. La guardamos
+    // como una polilinea con sus distancias acumuladas para interpolar a lo largo de
+    // ella a velocidad pareja.
     void ConstruirRutaEntrada()
     {
         rutaEntrada.Clear();
         distanciaEnRuta.Clear();
+        for (int i = 0; ; i++)
+        {
+            var t = Anchor($"PATH_ACCESO_{i:D3}");
+            if (!t) break;
+            rutaEntrada.Add(t.position);
+        }
         for (int i = 0; ; i++)
         {
             var t = Anchor($"QUEUE_GENERAL_{i:D3}");
@@ -241,6 +316,7 @@ public class SimulationRunner : MonoBehaviour
         {
             num_voters = numVoters,
             arrival_rate = promedioLlegadasPorMinuto,
+            arrival_profile = perfilLlegadas == PerfilLlegadas.Uniforme ? "uniforme" : "realista",
             seed,
             secretario_capacity = secretarioCapacity,
             mesa_capacity       = mesaCapacity,
@@ -309,6 +385,8 @@ public class SimulationRunner : MonoBehaviour
     {
         if (timeline == null) return;
 
+        LeerAtajosDeTeclado();
+
         // El reloj se detiene cuando termina la jornada (sale el ultimo votante).
         float fin = timeline.summary != null ? timeline.summary.duration_minutes : float.MaxValue;
         if (simClock >= fin)
@@ -316,9 +394,10 @@ public class SimulationRunner : MonoBehaviour
             simClock = fin;
             jornadaTerminada = true;
         }
-        else
+        else if (!pausado)
         {
-            simClock += Time.deltaTime * (speed / 60f);   // speed = minutos simulados por segundo real
+            // multiplicadorVelocidad = segundos simulados por segundo real; /60 -> minutos.
+            simClock += Time.deltaTime * (multiplicadorVelocidad / 60f);
         }
 
         ProcessVoterEvents();
@@ -327,7 +406,100 @@ public class SimulationRunner : MonoBehaviour
         ProcessExternalEvents();
         ProcessMovements();
         InterpolateActiveMoves();
+        BarrerVotantesQueSalieron();
         UpdateAnimators();
+    }
+
+    // Destruye a los votantes cuya caminata de salida ya termino (o al cerrar la
+    // jornada, para no dejar a nadie a medio camino). Se mantienen vivos durante la
+    // salida para que la animacion de caminado se reproduzca.
+    void BarrerVotantesQueSalieron()
+    {
+        if (despawnAt.Count == 0) return;
+
+        var fuera = new List<int>();
+        foreach (var (id, t) in despawnAt)
+            if (jornadaTerminada || simClock >= t) fuera.Add(id);
+
+        foreach (var id in fuera)
+        {
+            if (voters.TryGetValue(id, out var go) && go) Destroy(go);
+            voters.Remove(id);
+            currentMove.Remove(id);
+            despawnAt.Remove(id);
+            salidaDesde.Remove(id);
+            voterSlot.Remove(id);
+        }
+    }
+
+    // Teclas 1-5 = x1/x2/x4/x16/x64, Espacio = pausa/reanuda, N o flecha derecha =
+    // salta a la siguiente llegada. Nuevo Input System: el legacy UnityEngine.Input
+    // esta deshabilitado en este proyecto.
+    void LeerAtajosDeTeclado()
+    {
+        var kb = Keyboard.current;
+        if (kb == null) return;
+
+        for (int i = 0; i < TECLAS_VELOCIDAD.Length; i++)
+            if (kb[TECLAS_VELOCIDAD[i]].wasPressedThisFrame)
+                multiplicadorVelocidad = MULTIPLICADORES[i];
+
+        if (kb[Key.Space].wasPressedThisFrame)
+            pausado = !pausado;
+
+        if (kb[Key.N].wasPressedThisFrame || kb[Key.RightArrow].wasPressedThisFrame)
+            SaltarASiguienteLlegada();
+    }
+
+    // Minuto de la proxima llegada (ARRIVAL) por delante de simClock, o -1 si ya no
+    // quedan llegadas (todos entraron / recepcion cerrada).
+    float MinutoSiguienteLlegada()
+    {
+        if (timeline == null || timeline.voter_events == null) return -1f;
+        foreach (var e in timeline.voter_events)
+            if (e.@event == "ARRIVAL" && e.t > simClock + 1e-4f)
+                return e.t;
+        return -1f;
+    }
+
+    // Adelanta el reloj hasta la proxima llegada. Los cursores monotonos de los
+    // Process*() drenan todo lo intermedio en el siguiente frame. Se detiene antes
+    // si en el camino empieza (o esta en curso) un evento externo, para que su
+    // efecto visual se active/desactive limpio.
+    void SaltarASiguienteLlegada()
+    {
+        if (timeline == null || jornadaTerminada) return;
+
+        float destino = MinutoSiguienteLlegada();
+        if (destino < 0f) return;
+
+        float fin = timeline.summary != null ? timeline.summary.duration_minutes : float.MaxValue;
+        destino = Mathf.Min(destino, fin);
+
+        if (timeline.external_events != null)
+        {
+            foreach (var ev in timeline.external_events)
+            {
+                float finEv = ev.t_start + ev.duration;
+                if (finEv <= simClock) continue;                     // ya paso entero
+                if (ev.t_start > simClock && ev.t_start < destino)
+                    destino = ev.t_start;                            // parar en su inicio
+                else if (ev.t_start <= simClock)
+                    destino = Mathf.Min(destino, finEv);             // en curso: parar al terminar
+            }
+        }
+
+        if (destino > simClock) simClock = destino;
+    }
+
+    // Salta al final real de la corrida. El siguiente Update() lo resuelve por el
+    // camino normal de fin de jornada: fija jornadaTerminada, los Process*() drenan
+    // lo que quede y BarrerVotantesQueSalieron() destruye a los votantes restantes.
+    void TerminarSimulacion()
+    {
+        if (timeline == null || jornadaTerminada) return;
+        float fin = timeline.summary != null ? timeline.summary.duration_minutes : simClock;
+        simClock = Mathf.Max(simClock, fin);
     }
 
     // Convierte los minutos simulados en una hora de reloj "HH:MM AM/PM".
@@ -341,7 +513,7 @@ public class SimulationRunner : MonoBehaviour
         return $"{h12:00}:{m:00} {ampm}";
     }
 
-    GUIStyle _estilo, _estiloFin, _estiloGanador, _caja;
+    GUIStyle _estilo, _estiloFin, _estiloGanador, _estiloCerrada, _boton, _caja;
     Font _fuente;
 
     // Arial solo existe en Windows/Mac; en Linux el equivalente metrico es
@@ -389,12 +561,25 @@ public class SimulationRunner : MonoBehaviour
                 fontSize = 21,
                 normal = { textColor = new Color(0.45f, 1f, 0.55f) }
             };
+            _estiloCerrada = new GUIStyle(_estilo)
+            {
+                fontSize = 22,
+                normal = { textColor = new Color(1f, 0.75f, 0.25f) }   // ambar
+            };
+            _boton = new GUIStyle(GUI.skin.button)
+            {
+                font = _fuente, fontSize = 15, richText = true,
+                padding = new RectOffset(4, 4, 4, 4)
+            };
         }
 
         var res = timeline.summary != null ? timeline.summary.results : null;
 
         // El panel crece segun cuantos candidatos haya, para no cortar texto.
         int alto = 180;
+        alto += 76;   // dos filas de controles de reproduccion
+        if (!jornadaTerminada) alto += 30;   // fila "Terminar jornada"
+        if (RecepcionCerrada) alto += 34;
         if (jornadaTerminada)
         {
             alto += 40;
@@ -411,6 +596,16 @@ public class SimulationRunner : MonoBehaviour
         GUILayout.Label($"Llegaron:   <b>{llegados}</b>", _estilo);
         GUILayout.Label($"Votaron:    <b>{atendidos}</b>", _estilo);
         GUILayout.Label($"Rechazados: <b>{rechazados}</b>", _estilo);
+
+        DibujarControlesReproduccion();
+
+        // Ya son las 20:00 (o mas) y todavia hay gente adentro. El reloj sigue
+        // corriendo; la jornada NO termina solo porque el reloj llegue aca.
+        if (RecepcionCerrada)
+        {
+            GUILayout.Space(8);
+            GUILayout.Label("RECEPCIÓN CERRADA", _estiloCerrada);
+        }
 
         if (jornadaTerminada)
         {
@@ -441,15 +636,79 @@ public class SimulationRunner : MonoBehaviour
         GUILayout.EndArea();
     }
 
-    // Enciende "Caminando" en quien tiene un movimiento activo, lo apaga en los demas.
+    // Fila de velocidades (x1..x64), pausa y salto a la siguiente llegada. Los
+    // mismos controles que las teclas 1-5 / Espacio / N.
+    void DibujarControlesReproduccion()
+    {
+        GUILayout.Space(10);
+
+        GUILayout.BeginHorizontal();
+        for (int i = 0; i < MULTIPLICADORES.Length; i++)
+        {
+            bool activo = Mathf.Approximately(multiplicadorVelocidad, MULTIPLICADORES[i]);
+            string etiqueta = activo ? $"<b>x{MULTIPLICADORES[i]:0}</b>" : $"x{MULTIPLICADORES[i]:0}";
+            var fondo = GUI.backgroundColor;
+            if (activo) GUI.backgroundColor = new Color(0.45f, 1f, 0.55f);
+            if (GUILayout.Button(etiqueta, _boton))
+                multiplicadorVelocidad = MULTIPLICADORES[i];
+            GUI.backgroundColor = fondo;
+        }
+        GUILayout.EndHorizontal();
+
+        GUILayout.Space(4);
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button(pausado ? "Reanudar" : "Pausa", _boton))
+            pausado = !pausado;
+
+        bool hayLlegada = !jornadaTerminada && MinutoSiguienteLlegada() >= 0f;
+        GUI.enabled = hayLlegada;
+        if (GUILayout.Button("Siguiente llegada >>", _boton))
+            SaltarASiguienteLlegada();
+        GUI.enabled = true;
+        GUILayout.EndHorizontal();
+
+        // Terminar de golpe: salta al final real de la corrida. Pide un segundo clic.
+        if (!jornadaTerminada)
+        {
+            GUILayout.Space(4);
+            if (!confirmandoFin)
+            {
+                if (GUILayout.Button("Terminar jornada", _boton))
+                    confirmandoFin = true;
+            }
+            else
+            {
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Confirmar terminar", _boton))
+                {
+                    TerminarSimulacion();
+                    confirmandoFin = false;
+                }
+                if (GUILayout.Button("Cancelar", _boton))
+                    confirmandoFin = false;
+                GUILayout.EndHorizontal();
+            }
+        }
+    }
+
+    // Tope del multiplicador para la animacion: de aqui en adelante el ciclo de
+    // piernas queda en "caminata rapida" en vez de volverse un borron a x16/x64.
+    const float ANIM_SPEED_MAX = 4f;
+
+    // Enciende "Caminando" en quien tiene un movimiento activo, lo apaga en los
+    // demas, y ata el ritmo del ciclo de piernas al reloj global (con tope) para
+    // que los modelos no "patinen" al subir la velocidad. En pausa se congela.
     void UpdateAnimators()
     {
+        float animSpeed = pausado ? 0f : Mathf.Min(multiplicadorVelocidad, ANIM_SPEED_MAX);
         foreach (var (id, go) in voters)
         {
             if (go == null) continue;
             var anim = go.GetComponentInChildren<Animator>();
             if (anim == null) continue;
             anim.SetBool("Caminando", currentMove.ContainsKey(id));
+            anim.speed = animSpeed;
         }
     }
 
@@ -463,23 +722,56 @@ public class SimulationRunner : MonoBehaviour
             {
                 llegados++;
                 var prefab = (Random.value < 0.5f) ? prefabHombre : prefabMujer;
-                var spawn = Anchor("SPAWN");
+                var spawn = Anchor("SPAWN_EXTERIOR") ?? Anchor("SPAWN");   // desde la calle, no la puerta
                 var go = Instantiate(prefab, spawn ? spawn.position : Vector3.zero, Quaternion.identity, transform);
                 go.name = $"Votante_{e.voter}";
                 voters[e.voter] = go;
             }
             else if (e.@event == "EXIT" || e.@event == "REJECTED")
             {
-                if (e.@event == "EXIT") atendidos++;
-                else rechazados++;
-                if (voters.TryGetValue(e.voter, out var go)) Destroy(go);
-                voters.Remove(e.voter);
-                currentMove.Remove(e.voter);
-                currentStation.Remove(e.voter);
-                SoltarLugarEnFila(e.voter);
-                ReleaseSlot(e.voter);
+                IniciarSalida(e.voter, e.@event);
             }
         }
+    }
+
+    // Arranca la caminata de salida de un votante. Libera ya sus recursos (fila,
+    // slot, contador) pero lo mantiene vivo hasta que llega a la puerta:
+    //  - EXIT: el backend ya manda un MOVE urna->salida; ProcessMovements lo va a
+    //    reproducir este mismo frame. Solo apuntamos cuando destruirlo.
+    //  - REJECTED: no hay MOVE en el timeline; sintetizamos una caminata de vuelta
+    //    hacia la entrada desde donde esta parado.
+    void IniciarSalida(int id, string evento)
+    {
+        if (evento == "EXIT") atendidos++;
+        else rechazados++;
+
+        currentStation.Remove(id);
+        SoltarLugarEnFila(id);
+        ReleaseSlot(id);
+
+        if (evento == "EXIT")
+        {
+            float tEnd = simClock + SALIDA_RECHAZO_MIN;   // respaldo si no aparece el tramo
+            if (timeline.movements != null)
+                foreach (var m in timeline.movements)
+                    if (m.voter == id && m.from == "urna" && m.to == "salida")
+                    {
+                        tEnd = m.t_end;
+                        break;
+                    }
+            despawnAt[id] = tEnd;
+            return;
+        }
+
+        // REJECTED: caminata sintetica de regreso a la entrada.
+        if (voters.TryGetValue(id, out var go) && go)
+            salidaDesde[id] = go.transform.position;
+        currentMove[id] = new Movement
+        {
+            voter = id, from = "__rechazo__", to = "entrada",
+            t_start = simClock, t_end = simClock + SALIDA_RECHAZO_MIN
+        };
+        despawnAt[id] = simClock + SALIDA_RECHAZO_MIN;
     }
 
     // Coloca a cada votante formado en su lugar de la fila. Sin esto todos los
@@ -648,12 +940,15 @@ public class SimulationRunner : MonoBehaviour
         }
     }
 
-    // duracionMin llega en minutos SIMULADOS (misma unidad que simClock);
-    // lo convertimos a segundos reales usando 'speed' (min simulado / seg real).
+    // duracionMin llega en minutos SIMULADOS (misma unidad que simClock); lo
+    // convertimos a segundos reales con la velocidad de reproduccion actual
+    // (multiplicadorVelocidad = segundos simulados por segundo real). Si se cambia
+    // la velocidad a mitad del temblor no se reajusta: dura lo que se calculo aqui.
     IEnumerator Temblor(float duracionMin)
     {
         var camOriginal = Camera.main.transform.localPosition;
-        float duracionReal = duracionMin * 60f / speed;
+        float velocidad = Mathf.Max(0.01f, multiplicadorVelocidad);
+        float duracionReal = duracionMin * 60f / velocidad;
         float t = 0f;
         while (t < duracionReal)
         {
@@ -681,9 +976,29 @@ public class SimulationRunner : MonoBehaviour
         foreach (var (id, m) in currentMove)
         {
             if (!voters.TryGetValue(id, out var go)) { terminados.Add(id); continue; }
-            var a = AnchorFor(m.from, id);
-            var b = AnchorFor(m.to, id);
-            if (!a || !b) { terminados.Add(id); continue; }
+
+            // Origen: una salida sintetica (rechazo) arranca desde la posicion guardada.
+            Vector3 aPos;
+            if (salidaDesde.TryGetValue(id, out var desdePos))
+                aPos = desdePos;
+            else
+            {
+                var a = AnchorFor(m.from, id);
+                if (!a) { terminados.Add(id); continue; }
+                aPos = a.position;
+            }
+
+            // Destino: si va a una estacion y ya tiene lugar de fila asignado, terminar
+            // el tramo exactamente en ese lugar (evita el salto escritorio -> fila).
+            Vector3 bPos;
+            if (EsEstacion(m.to) && anclaDeEspera.TryGetValue(id, out var qa) && qa)
+                bPos = qa.position;
+            else
+            {
+                var b = AnchorFor(m.to, id);
+                if (!b) { terminados.Add(id); continue; }
+                bPos = b.position;
+            }
 
             float u = Mathf.InverseLerp(m.t_start, m.t_end, simClock);
             Vector3 punto, dir;
@@ -691,11 +1006,11 @@ public class SimulationRunner : MonoBehaviour
             // en linea recta.
             bool esLlegada = m.from.ToLowerInvariant() is "entrada" or "spawn";
             if (esLlegada && rutaEntrada.Count > 0)
-                PuntoEnRutaEntrada(a.position, b.position, u, out punto, out dir);
+                PuntoEnRutaEntrada(aPos, bPos, u, out punto, out dir);
             else
             {
-                punto = Vector3.Lerp(a.position, b.position, u);
-                dir = b.position - a.position;
+                punto = Vector3.Lerp(aPos, bPos, u);
+                dir = bPos - aPos;
             }
             go.transform.position = punto;
             dir.y = 0;
@@ -713,16 +1028,20 @@ public class SimulationRunner : MonoBehaviour
         foreach (var id in terminados) currentMove.Remove(id);
     }
 
-    // Resuelve "secretario" a un SLOT concreto, "spawn" a SPAWN, "salida" a EXIT.
+    // Resuelve "secretario" a un SLOT concreto, "entrada"/"spawn" a la calle
+    // (SPAWN_EXTERIOR), "salida" a EXIT.
     Transform AnchorFor(string etapa, int voterId)
     {
         etapa = etapa.ToLowerInvariant();
         // El backend nombra el origen "entrada"; "spawn" se acepta por si acaso.
-        if (etapa == "entrada" || etapa == "spawn") return Anchor("SPAWN");
+        if (etapa == "entrada" || etapa == "spawn") return Anchor("SPAWN_EXTERIOR") ?? Anchor("SPAWN");
         if (etapa == "salida") return Anchor("EXIT");
         int slot = voterSlot.TryGetValue(voterId, out var s) ? s : 0;
         return Anchor($"SLOT_{etapa.ToUpperInvariant()}_{slot:D2}");
     }
+
+    // true si `etapa` es una de las cuatro estaciones con fila.
+    bool EsEstacion(string etapa) => capacities.ContainsKey(etapa.ToLowerInvariant());
 
     Transform Anchor(string name)
     {

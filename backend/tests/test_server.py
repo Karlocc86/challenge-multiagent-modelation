@@ -4,6 +4,80 @@ from casilla import CasillaModel
 from server import app
 
 
+def test_dashboard_route_serves_html_with_the_run_embedded():
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.mimetype == "text/html"
+    body = response.get_data(as_text=True)
+    assert "Resultados de la simulación" in body
+    # the /*__DATA__*/null placeholder was replaced with real JSON
+    assert 'window.__DATA__ = {"params"' in body
+
+
+def test_dashboard_route_accepts_query_overrides():
+    client = app.test_client()
+
+    response = client.get("/?seed=1&num_voters=40")
+
+    assert response.status_code == 200
+    assert '"num_voters": 40' in response.get_data(as_text=True)
+
+
+def test_dashboard_route_rejects_a_non_numeric_query_param():
+    client = app.test_client()
+
+    response = client.get("/?num_voters=abc")
+
+    assert response.status_code == 400
+
+
+def test_simulate_rejects_an_unknown_arrival_profile():
+    client = app.test_client()
+
+    response = client.post(
+        "/simulate", json={"num_voters": 5, "seed": 7, "arrival_profile": "loco"}
+    )
+
+    assert response.status_code == 400
+    assert "arrival_profile" in response.get_json()["error"]
+
+
+def test_simulate_defaults_to_the_realista_arrival_profile():
+    client = app.test_client()
+
+    response = client.post("/simulate", json={"num_voters": 300, "seed": 7})
+
+    assert response.status_code == 200
+    arrivals = [
+        e["t"] for e in response.get_json()["voter_events"] if e["event"] == "ARRIVAL"
+    ]
+    # realista draws all arrivals inside the 8:00-18:00 window (<= 600 min)
+    assert arrivals and max(arrivals) <= 600
+
+
+def test_dashboard_shows_the_last_simulate_run_by_default():
+    client = app.test_client()
+
+    client.post("/simulate", json={"num_voters": 17, "seed": 5})
+    body = client.get("/").get_data(as_text=True)
+
+    assert '"num_voters": 17' in body
+    assert '"live": true' in body
+
+
+def test_dashboard_query_string_forces_a_fresh_run_over_the_cached_one():
+    client = app.test_client()
+
+    client.post("/simulate", json={"num_voters": 17, "seed": 5})
+    body = client.get("/?num_voters=9").get_data(as_text=True)
+
+    assert '"num_voters": 9' in body
+    assert '"live": false' in body
+
+
 def test_simulate_returns_full_contract_shape():
     client = app.test_client()
 

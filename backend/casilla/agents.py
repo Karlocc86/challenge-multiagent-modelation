@@ -23,7 +23,14 @@ logger = logging.getLogger(__name__)
 
 ADULTO_MAYOR_THRESHOLD = 60
 CANDIDATOS = ["PAN", "Movimiento Ciudadano", "Morena"]
-CANDIDATO_WEIGHTS = None  # None = equal probability for every candidate
+# Calibrated to the real PREP 2024 presidential result of the casilla this
+# project models: Sección 3068, Casilla Contigua 5 (Esc. Prim. Urb. Fed.
+# Calmecac, Puerta de Hierro / Paseo Andares, Zapopan, Jal.) — Xóchitl Gálvez
+# (PAN-PRI-PRD) 354 votos, Jorge Álvarez Máynez (MC) 51, Claudia Sheinbaum
+# (Morena-PT-PVEM) 50. random.choices() normalizes weights on its own, so the
+# raw vote counts are used as-is (nulos/candidaturas no registradas — ~2% of
+# the real total — have no category here and are left out of the draw).
+CANDIDATO_WEIGHTS = [354, 51, 50]
 
 
 @dataclass

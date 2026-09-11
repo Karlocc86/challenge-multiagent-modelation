@@ -12,7 +12,7 @@ import argparse
 import logging
 
 from casilla import CasillaModel
-from casilla.model import EXTERNAL_EVENT_KINDS
+from casilla.model import ARRIVAL_PROFILES, EXTERNAL_EVENT_KINDS
 
 
 def main() -> None:
@@ -21,6 +21,9 @@ def main() -> None:
     )
     parser.add_argument("--num-voters", type=int, default=200)
     parser.add_argument("--arrival-rate", type=float, default=1 / 3)
+    parser.add_argument(
+        "--arrival-profile", choices=ARRIVAL_PROFILES, default="realista"
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--secretario-capacity", type=int, default=1)
     parser.add_argument("--mesa-capacity", type=int, default=1)
@@ -41,6 +44,7 @@ def main() -> None:
     model = CasillaModel(
         num_voters=args.num_voters,
         arrival_rate=args.arrival_rate,
+        arrival_profile=args.arrival_profile,
         secretario_capacity=args.secretario_capacity,
         mesa_capacity=args.mesa_capacity,
         casilla_capacity=args.casilla_capacity,

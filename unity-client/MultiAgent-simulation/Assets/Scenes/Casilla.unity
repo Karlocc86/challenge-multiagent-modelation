@@ -373,17 +373,22 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SimulationRunner
   serverUrl: http://127.0.0.1:5000/simulate
-  numVoters: 1400
-  promedioLlegadasPorMinuto: 2
+  numVoters: 701
+  perfilLlegadas: 0
+  promedioLlegadasPorMinuto: 0.8
   seed: 7
+  semillaAleatoria: 1
   secretarioCapacity: 6
   mesaCapacity: 3
   casillaCapacity: 8
   urnaCapacity: 2
   prefabHombre: {fileID: 5273517880495183775, guid: ceb35221f402a44febd4a3244e6ccab8, type: 3}
   prefabMujer: {fileID: 7128341772623553415, guid: 3b570d313ec02cee79b92118b2d52350, type: 3}
-  speed: 60
+  multiplicadorInicial: 1
   yawOffset: 90
+  eventoForzado: 0
+  minutoDelEvento: 0
+  duracionDelEvento: 0
   lluviaVFX: {fileID: 1500429293}
   lucesCasilla: {fileID: 521687106}
   shakeMagnitud: 0.15

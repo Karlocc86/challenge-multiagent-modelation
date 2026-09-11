@@ -42,6 +42,28 @@ TRANSIT_TIMES: dict[tuple[str, str], tuple[float, float]] = {
 }
 
 EXTERNAL_EVENT_KINDS = ["corte_de_luz", "temblor", "aguacero"]
+# Length of the voting day in simulated minutes (8:00 AM -> 8:00 PM). Arrivals
+# stop being admitted at this mark; voters already inside keep being served, so
+# a run can finish well after it.
+JORNADA_MINUTOS = 12 * 60
+
+ARRIVAL_PROFILES = ("realista", "uniforme")
+
+# "realista" profile: a non-homogeneous arrival process whose intensity varies
+# through the day. Turnout (num_voters) is drawn i.i.d. from this density and
+# sorted, i.e. an inhomogeneous Poisson process conditioned on the count.
+#
+#   f(t) = 0.82 * Beta((t-8)/10; 2, 4)  +  0.18 * Beta((t-8)/10; 6, 2)
+#
+# t in hours; (t-8)/10 maps 8:00-18:00 onto [0, 1]. The first component is the
+# big mid-morning peak (Beta(2,4), mode ~11:00); the second a smaller
+# late-afternoon bump (Beta(6,2), mode ~16:00). Support is 8:00-18:00, so the
+# last two hours before closing are almost empty.
+ARRIVAL_WINDOW_MINUTES = 10 * 60
+ARRIVAL_MIXTURE = ((0.82, 2.0, 4.0), (0.18, 6.0, 2.0))
+# Backwards-compatible alias for callers that referenced the older name.
+CLOSING_TIME_MINUTES = JORNADA_MINUTOS
+PRE_CLOSING_MINUTES = 30
 
 
 class CasillaModel(Model):
@@ -52,6 +74,7 @@ class CasillaModel(Model):
         num_voters: int = 200,
         arrival_rate: float = 1 / 3,
         *,
+        arrival_profile: str = "realista",
         secretario_capacity: int = 1,
         mesa_capacity: int = 1,
         casilla_capacity: int = 1,
@@ -68,6 +91,13 @@ class CasillaModel(Model):
         # stop it since this model never calls step() and Mesa 3.5.1 has no
         # public API to opt out at construction time.
         self._default_schedule.stop()
+
+        if arrival_profile not in ARRIVAL_PROFILES:
+            raise ValueError(
+                f"arrival_profile debe ser uno de {ARRIVAL_PROFILES}; "
+                f"se recibio {arrival_profile!r}."
+            )
+        self.arrival_profile = arrival_profile
 
         self._scheduled_callbacks: list[Any] = []
         self._voter_counter = 0
@@ -141,12 +171,63 @@ class CasillaModel(Model):
             next_time = self._event_list.peek_ahead(1)[0].time
             self.run_until(next_time)
 
+    def run_until_before_closing(
+        self, minutes_before_closing: float = PRE_CLOSING_MINUTES
+    ) -> None:
+        """Advance to the configured pre-closing checkpoint.
+
+        Events after the checkpoint remain queued so the caller can inspect
+        the state shortly before closing and then continue with
+        ``run_to_completion``.
+        """
+        if not 0 <= minutes_before_closing <= JORNADA_MINUTOS:
+            raise ValueError("minutes_before_closing must be within the workday")
+
+        checkpoint = JORNADA_MINUTOS - minutes_before_closing
+        while (
+            not self._event_list.is_empty()
+            and self._event_list.peek_ahead(1)[0].time <= checkpoint
+        ):
+            self.run_until(self._event_list.peek_ahead(1)[0].time)
+        if self.time < checkpoint:
+            self.run_until(checkpoint)
+
     def _schedule_arrivals(self, num_voters: int, arrival_rate: float) -> None:
-        time = 0.0
-        for _ in range(num_voters):
-            time += self.random.expovariate(arrival_rate)
-            self.schedule_callback(self._on_voter_arrival, at=time)
-            self.last_scheduled_arrival_time = time
+        if self.arrival_profile == "uniforme":
+            # Homogeneous Poisson process: exponential gaps around 1/arrival_rate.
+            times: list[float] = []
+            t = 0.0
+            for _ in range(num_voters):
+                t += self.random.expovariate(arrival_rate)
+                if t > JORNADA_MINUTOS:
+                    break
+                times.append(t)
+        else:
+            # Non-homogeneous: draw each arrival minute from the time-varying
+            # mixture density and sort. Its support ends at 18:00 (< 20:00), so
+            # the closing cutoff below never actually trims anything here.
+            times = sorted(
+                self._sample_realistic_arrival() for _ in range(num_voters)
+            )
+            times = [t for t in times if t <= JORNADA_MINUTOS]
+
+        # Reception closes at 8:00 PM: later arrivals are turned away at the door
+        # and never scheduled. Voters already admitted keep going.
+        for t in times:
+            self.schedule_callback(self._on_voter_arrival, at=t)
+            self.last_scheduled_arrival_time = t
+
+    def _sample_realistic_arrival(self) -> float:
+        """One arrival minute drawn from the ``realista`` mixture density."""
+        r = self.random.random()
+        cumulative = 0.0
+        alpha, beta = ARRIVAL_MIXTURE[-1][1:]
+        for weight, a, b in ARRIVAL_MIXTURE:
+            cumulative += weight
+            if r <= cumulative:
+                alpha, beta = a, b
+                break
+        return self.random.betavariate(alpha, beta) * ARRIVAL_WINDOW_MINUTES
 
     def _on_voter_arrival(self) -> None:
         self._voter_counter += 1
