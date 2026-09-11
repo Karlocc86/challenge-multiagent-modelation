@@ -79,6 +79,7 @@ class CasillaModel(Model):
         arrival_rate: float = 1 / 3,
         *,
         arrival_profile: str = "realista",
+        arrival_beta: dict | None = None,
         secretario_capacity: int = 1,
         mesa_capacity: int = 1,
         casilla_capacity: int = 1,
@@ -201,6 +202,11 @@ class CasillaModel(Model):
             self.run_until(checkpoint)
 
     def _schedule_arrivals(self, num_voters: int, arrival_rate: float) -> None:
+        if self.arrival_beta is not None:
+            for time in sample_beta_arrivals(self.random, num_voters, self.arrival_beta):
+                self.schedule_callback(self._on_voter_arrival, at=time)
+                self.last_scheduled_arrival_time = time
+            return
         if self.arrival_profile == "uniforme":
             # Homogeneous Poisson process: exponential gaps around 1/arrival_rate.
             times: list[float] = []

@@ -155,6 +155,7 @@ public class SimulationRunner : MonoBehaviour
         public int voters_exited;
         public int voters_rejected;
         public Results results;
+        public Newtonsoft.Json.Linq.JObject arrival_beta;
     }
     // Conteo de la urna. Solo cuenta a quien llego a la urna y salio: un
     // votante rechazado en el secretario nunca deposita su voto.
@@ -336,6 +337,7 @@ public class SimulationRunner : MonoBehaviour
             num_voters = numVoters,
             arrival_rate = promedioLlegadasPorMinuto,
             arrival_profile = perfilLlegadas == PerfilLlegadas.Uniforme ? "uniforme" : "realista",
+            arrival_beta = formulaBeta,
             seed,
             secretario_capacity = secretarioCapacity,
             mesa_capacity       = mesaCapacity,
@@ -568,7 +570,8 @@ public class SimulationRunner : MonoBehaviour
         return $"{h12:00}:{m:00} {ampm}";
     }
 
-    GUIStyle _estilo, _estiloFin, _estiloGanador, _estiloCerrada, _boton, _caja;
+    GUIStyle _estilo, _estiloFin, _estiloGanador, _estiloCerrada, _boton, _caja,
+             _estiloGrafica, _estiloGraficaPequeno, _estiloGraficaCentro;
     Font _fuente;
 
     // Arial solo existe en Windows/Mac; en Linux el equivalente metrico es
@@ -625,6 +628,12 @@ public class SimulationRunner : MonoBehaviour
             {
                 font = _fuente, fontSize = 15, richText = true,
                 padding = new RectOffset(4, 4, 4, 4)
+            };
+            _estiloGrafica = new GUIStyle(_estilo) { fontSize = 18 };
+            _estiloGraficaPequeno = new GUIStyle(_estilo) { fontSize = 13 };
+            _estiloGraficaCentro = new GUIStyle(_estiloGraficaPequeno)
+            {
+                alignment = TextAnchor.UpperCenter
             };
         }
 

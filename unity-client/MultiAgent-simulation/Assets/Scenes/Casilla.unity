@@ -544,7 +544,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SimulationRunner
   serverUrl: http://127.0.0.1:5000/simulate
-  numVoters: 701
+  numVoters: 469
   perfilLlegadas: 0
   promedioLlegadasPorMinuto: 0.8
   seed: 7
@@ -566,6 +566,8 @@ MonoBehaviour:
   horaInicio: 8
   mostrarPanel: 1
   mostrarGraficaLlegadas: 1
+  usarFormulaBeta: 1
+  horaFinBeta: 18
 --- !u!1001 &790764016
 PrefabInstance:
   m_ObjectHideFlags: 0

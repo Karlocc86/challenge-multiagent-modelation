@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, request
 
 from casilla import CasillaModel
+from casilla.arrivals import validate_beta_mixture
 from casilla.model import ARRIVAL_PROFILES, EXTERNAL_EVENT_KINDS
 from casilla.timeline import build_timeline
 
@@ -146,6 +147,7 @@ def simulate():
         num_voters=count,
         arrival_rate=arrival_rate,
         arrival_profile=arrival_profile,
+        arrival_beta=beta_mixture,
         secretario_capacity=params.get("secretario_capacity", 1),
         mesa_capacity=params.get("mesa_capacity", 1),
         casilla_capacity=params.get("casilla_capacity", 1),

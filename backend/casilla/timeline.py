@@ -37,6 +37,7 @@ def _build_summary(model: CasillaModel) -> dict[str, Any]:
         "jornada_minutes": JORNADA_MINUTOS,
         "reception_closed_at": JORNADA_MINUTOS,
         "last_arrival_minute": model.last_scheduled_arrival_time,
+        "arrival_beta": model.arrival_beta,
         "overtime_minutes": max(0.0, model.time - JORNADA_MINUTOS),
         "voters_arrived": event_types.count("ARRIVAL"),
         "voters_exited": event_types.count("EXIT"),
