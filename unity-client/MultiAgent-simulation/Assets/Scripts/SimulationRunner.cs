@@ -570,7 +570,7 @@ public class SimulationRunner : MonoBehaviour
         return $"{h12:00}:{m:00} {ampm}";
     }
 
-    GUIStyle _estilo, _estiloFin, _estiloGanador, _estiloCerrada, _boton, _caja,
+    GUIStyle _estilo, _estiloFin, _estiloGanador, _estiloCerrada, _boton, _caja, _cajaPanel,
              _estiloGrafica, _estiloGraficaPequeno, _estiloGraficaCentro;
     Font _fuente;
 
@@ -603,6 +603,9 @@ public class SimulationRunner : MonoBehaviour
             // asignamos una explicitamente para que el texto se dibuje.
             _fuente = CargarFuente(20);
             _caja = new GUIStyle(GUI.skin.box);
+            // Mismos margenes que tenia el panel cuando la caja y el area se
+            // dibujaban por separado (14 a la izquierda, 10 arriba y abajo).
+            _cajaPanel = new GUIStyle(GUI.skin.box) { padding = new RectOffset(14, 6, 10, 10) };
             _estilo = new GUIStyle
             {
                 font = _fuente, fontSize = 20, richText = true,
@@ -639,20 +642,11 @@ public class SimulationRunner : MonoBehaviour
 
         var res = timeline.summary != null ? timeline.summary.results : null;
 
-        // El panel crece segun cuantos candidatos haya, para no cortar texto.
-        int alto = 180;
-        alto += 76;   // dos filas de controles de reproduccion
-        if (!jornadaTerminada) alto += 30;   // fila "Terminar jornada"
-        if (RecepcionCerrada) alto += 34;
-        if (jornadaTerminada)
-        {
-            alto += 40;
-            if (res != null && res.votes_by_candidate != null)
-                alto += 34 + res.votes_by_candidate.Count * 24 + 34;
-        }
-
-        GUI.Box(new Rect(20, 20, 300, alto), GUIContent.none, _caja);
-        GUILayout.BeginArea(new Rect(34, 30, 280, alto - 10));
+        // La caja se ajusta sola a lo que tenga adentro. Antes su alto se sumaba a
+        // mano fila por fila, y cada boton nuevo que no se contaba quedaba cortado
+        // por debajo del borde.
+        GUILayout.BeginArea(new Rect(20, 20, 300, Screen.height - 40));
+        GUILayout.BeginVertical(_cajaPanel);
         GUILayout.Label("<b>Casilla Especial - Andares</b>", _estilo);
         GUILayout.Space(6);
         GUILayout.Label($"Hora:  <b>{RelojSimulado()}</b>", _estilo);
@@ -697,6 +691,7 @@ public class SimulationRunner : MonoBehaviour
                     GUILayout.Label($"GANADOR: {res.winner}", _estiloGanador);
             }
         }
+        GUILayout.EndVertical();
         GUILayout.EndArea();
         if (jornadaTerminada)
             DibujarGraficaLlegadas();
